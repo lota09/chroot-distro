@@ -112,7 +112,7 @@ Use a script to simplify the process:
 
 ## Additional Tips
 - Run `apt` commands inside the chroot environment, not Termux directly.
-- If audio doesn’t work, check the `mpd.conf` file for configuration issues.
+- If audio doesn?셳 work, check the `mpd.conf` file for configuration issues.
 - For more help, see the [chroot-distro documentation](https://github.com/Magisk-Modules-Alt-Repo/chroot-distro).
 
 ---

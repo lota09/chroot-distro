@@ -182,7 +182,7 @@ for architecture in $architectures; do
         download_url="${chimera_rootfs_base_url}/${version}"
         check_url $download_url
     done
-    # Adélie
+    # Ad챕lie
     releases="full mini"
     for release in $releases; do
         version="$(wget -qO- "$adelie_rootfs_base_url" | grep -oE "adelie-rootfs-${release}-$(echo $architecture | sed s/arm64/aarch64/ | sed s/amd64/x86_64/ | sed s/armhf/armv7/)-[^\" ]+-[0-9]{8}\.txz" | sed -E 's/.*-([0-9]{8})\.txz/\1/' | head -n 1)"

@@ -56,6 +56,9 @@ else
     fi
 fi
 
+chroot_distro_image_file="${CHROOT_DISTRO_IMAGE_FILE:-}"
+chroot_distro_image_size="${CHROOT_DISTRO_IMAGE_SIZE:-}"
+
 script=$(basename "$0")
 
 user_id=$(id -u)
@@ -63,6 +66,43 @@ if [ "${user_id}" -ne 0 ]; then
     print_message error "This script requires root privileges. Please run it as root."
     chroot_distro_exit 1
 fi
+
+chroot_distro_mount_rootfs_image() {
+    if [ -z "$chroot_distro_image_file" ]; then
+        return
+    fi
+    if grep -wq "$chroot_distro_path" /proc/mounts; then
+        return
+    fi
+    if [ ! -f "$chroot_distro_image_file" ]; then
+        if [ -n "$chroot_distro_image_size" ]; then
+            print_message info "Creating rootfs image: $chroot_distro_image_file"
+            mkdir -p "$(dirname "$chroot_distro_image_file")"
+            if ! truncate -S "$chroot_distro_image_size" "$chroot_distro_image_file"; then
+                print_message error "Failed to create rootfs image with truncate"
+                chroot_distro_exit 1
+            fi
+            if ! mke2fs -t ext4 "$chroot_distro_image_file"; then
+                print_message error "Failed to format rootfs image with ext4"
+                chroot_distro_exit 1
+            fi
+        else
+            print_message error "Rootfs image not found: $chroot_distro_image_file"
+            print_message note "Create it manually or set CHROOT_DISTRO_IMAGE_SIZE to auto-create."
+            chroot_distro_exit 1
+        fi
+    fi
+    mkdir -p "$chroot_distro_path"
+    if ! mount -o rw,relatime "$chroot_distro_image_file" "$chroot_distro_path"; then
+        # Some Android builds require an explicit filesystem type and loop option for images.
+        if ! mount -t ext4 -o loop,rw,relatime "$chroot_distro_image_file" "$chroot_distro_path"; then
+            print_message error "Failed to mount rootfs image on $chroot_distro_path"
+            print_message note "If this is a new image, format it first: mke2fs -t ext4 $chroot_distro_image_file"
+            chroot_distro_exit 1
+        fi
+    fi
+    mount -o remount,exec,suid,dev "$chroot_distro_path" >/dev/null 2>&1 || true
+}
 
 architecture=$(uname -m)
 
@@ -445,7 +485,9 @@ if ! tar --help 2>&1 | grep -q -- "-J" ; then
     chroot_distro_exit 1
 fi
 
-mkdir -p "$chroot_distro_path" "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
+mkdir -p "$chroot_distro_path"
+chroot_distro_mount_rootfs_image
+mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
 
 fix_suid_file="$chroot_distro_path/.config/fix_suid"
 
@@ -809,7 +851,7 @@ chroot_distro_check_if_supported() {
 
 chroot_distro_download() {
     distro="$1"
-    
+    chroot_distro_mount_rootfs_image
     chroot_distro_check_if_supported "$distro"
     
     if [ -n "$2" ]; then
@@ -1163,6 +1205,7 @@ chroot_distro_mount_system_points() {
     if [ "${CHROOT_DISTRO_MOUNT:-}" = "false" ]; then
        return
     fi
+    chroot_distro_mount_rootfs_image
     distro_path="$1"
     if [ "1" = "$android_bind_val" ]; then
         mount_android_dirs
@@ -1374,6 +1417,8 @@ prepare_chroot_distro() {
 chroot_distro_install() {
     distro=$1
     chroot_distro_check_if_supported "$distro"
+
+    chroot_distro_mount_rootfs_image
 
     archive_path="$chroot_distro_path/.rootfs/$distro.tar.xz"
     if [ ! -f "$archive_path" ]; then
