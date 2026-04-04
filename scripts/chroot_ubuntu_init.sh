@@ -1,8 +1,22 @@
 #!/bin/sh
 set -eu
 
+DEBUG_TRACE="${DEBUG_TRACE:-true}"
+if [ "${DEBUG_TRACE}" = "true" ]; then
+  set -x
+fi
+
+log() {
+  printf "%s\n" "$*"
+}
+
+run() {
+  log "CMD: $*"
+  "$@"
+}
+
 if [ "$(id -u)" -ne 0 ]; then
-  echo "This script must run as root inside the chroot." >&2
+  log "ERROR: This script must run as root inside the chroot."
   exit 1
 fi
 
@@ -17,7 +31,7 @@ while [ "$#" -gt 0 ]; do
       conf_file="${1#*=}"
       ;;
     *)
-      echo "Unknown option: $1" >&2
+      log "ERROR: Unknown option: $1"
       exit 1
       ;;
   esac
@@ -25,10 +39,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$conf_file" ] || [ ! -f "$conf_file" ]; then
-  echo "no input config file" >&2
+  log "ERROR: no input config file"
   exit 1
 fi
 
+log "Loading config: ${conf_file}"
 . "$conf_file"
 
 has_include() {
@@ -58,6 +73,7 @@ CHROOT_SSH_PORT="${CHROOT_SSH_PORT:-${SSH_PORT:-22}}"
 CHROOT_SSH_ARGS="${CHROOT_SSH_ARGS:-${SSH_ARGS:-}}"
 
 if [ -n "${INCLUDE:-}" ]; then
+  log "INCLUDE detected: ${INCLUDE}"
   has_include "extra/ssh" && CHROOT_SSH="true" || CHROOT_SSH="false"
   has_include "extra/pulse" && CHROOT_PULSE="true" || CHROOT_PULSE="false"
   has_include "graphics/vnc" && CHROOT_VNC="true" || CHROOT_VNC="false"
@@ -82,147 +98,209 @@ if [ -n "${INCLUDE:-}" ]; then
 fi
 
 if [ -z "${CHROOT_USER}" ]; then
-  echo "Missing CHROOT_USER/USER_NAME in config" >&2
+  log "ERROR: Missing CHROOT_USER/USER_NAME in config"
   exit 1
 fi
 
-echo "[Step 7] Network + Android group mappings"
+log "[Step 7] Network + Android group mappings"
 # Step 7: basic network + Android group mappings
+log "CMD: write /etc/resolv.conf"
 printf "nameserver 8.8.8.8\n" > /etc/resolv.conf
+log "CMD: write /etc/hosts"
 printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
 
-getent group aid_inet >/dev/null 2>&1 || groupadd -g 3003 aid_inet
-getent group aid_net_raw >/dev/null 2>&1 || groupadd -g 3004 aid_net_raw
-getent group aid_graphics >/dev/null 2>&1 || groupadd -g 1003 aid_graphics
+if getent group aid_inet >/dev/null 2>&1; then
+  log "aid_inet group already exists"
+else
+  run groupadd -g 3003 aid_inet
+fi
+if getent group aid_net_raw >/dev/null 2>&1; then
+  log "aid_net_raw group already exists"
+else
+  run groupadd -g 3004 aid_net_raw
+fi
+if getent group aid_graphics >/dev/null 2>&1; then
+  log "aid_graphics group already exists"
+else
+  run groupadd -g 1003 aid_graphics
+fi
 
 if id _apt >/dev/null 2>&1; then
-  usermod -g 3003 -G 3003,3004 -a _apt || true
+  log "_apt user found, applying Android network groups"
+  run usermod -g 3003 -G 3003,3004 -a _apt || true
+else
+  log "_apt user not found, skipping"
 fi
-usermod -G 3003 -a root || true
+run usermod -G 3003 -a root || true
 
-echo "[Step 7] apt update/upgrade + base tools"
-apt update
-apt upgrade -y
-apt install -y vim net-tools sudo git
+log "[Step 7] apt update/upgrade + base tools"
+run apt update
+run apt upgrade -y
+run apt install -y vim net-tools sudo git
 
-echo "[Step 8] Timezone configuration"
+log "[Step 8] Timezone configuration"
 # Step 8: timezone (non-interactive)
-apt install -y tzdata
-dpkg-reconfigure tzdata
+run apt install -y tzdata
+run dpkg-reconfigure tzdata
 
-echo "[Step 9] User creation and groups"
-# Step 9: user creation
-getent group storage >/dev/null 2>&1 || groupadd storage
-getent group wheel >/dev/null 2>&1 || groupadd wheel
-getent group users >/dev/null 2>&1 || groupadd users
+log "[Step 9] User creation and groups"
+# Step 9: user creation (Ubuntu default: adduser creates user group)
+if getent group storage >/dev/null 2>&1; then
+  log "storage group already exists"
+else
+  run groupadd storage
+fi
+if getent group sudo >/dev/null 2>&1; then
+  log "sudo group already exists"
+else
+  run groupadd sudo
+fi
 if ! id "${CHROOT_USER}" >/dev/null 2>&1; then
-  useradd -m -g users -G wheel,audio,video,storage,aid_inet -s /bin/bash "${CHROOT_USER}"
+  log "Creating user with adduser (Ubuntu default behavior)"
+  run adduser --disabled-password --gecos "" "${CHROOT_USER}"
+  run usermod -aG sudo,audio,video,storage,aid_inet "${CHROOT_USER}"
+else
+  log "User ${CHROOT_USER} already exists"
 fi
 if [ -n "${CHROOT_PASS}" ]; then
+  log "CMD: set password for ${CHROOT_USER}"
   printf "%s:%s\n" "${CHROOT_USER}" "${CHROOT_PASS}" | chpasswd
+else
+  log "No CHROOT_PASS provided, skipping password set"
 fi
 
-echo "[Step 10] Sudoers configuration"
+log "[Step 10] Sudoers configuration"
 # Step 10: sudoers drop-in (avoids visudo)
+log "CMD: write /etc/sudoers.d/99-${CHROOT_USER}"
 printf "%s ALL=(ALL:ALL) ALL\n" "${CHROOT_USER}" > "/etc/sudoers.d/99-${CHROOT_USER}"
-chmod 440 "/etc/sudoers.d/99-${CHROOT_USER}"
+run chmod 440 "/etc/sudoers.d/99-${CHROOT_USER}"
 
-echo "[Step 10] SSH setup (optional)"
+log "[Step 10] SSH setup (optional)"
 # Linux Deploy extra: ssh
 if [ "${CHROOT_SSH}" = "true" ]; then
-  apt install -y openssh-server
-  sed -i -E 's/#?PasswordAuthentication .*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-  sed -i -E 's/#?PermitRootLogin .*/PermitRootLogin yes/g' /etc/ssh/sshd_config
-  sed -i -E 's/#?AcceptEnv .*/AcceptEnv LANG/g' /etc/ssh/sshd_config
+  log "SSH enabled"
+  run apt install -y openssh-server
+  run sed -i -E 's/#?PasswordAuthentication .*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+  run sed -i -E 's/#?PermitRootLogin .*/PermitRootLogin yes/g' /etc/ssh/sshd_config
+  run sed -i -E 's/#?AcceptEnv .*/AcceptEnv LANG/g' /etc/ssh/sshd_config
+else
+  log "SSH disabled"
 fi
 
-echo "[Step 10] PulseAudio setup (optional)"
+log "[Step 10] PulseAudio setup (optional)"
 # Linux Deploy extra: pulse
 if [ "${CHROOT_PULSE}" = "true" ]; then
-  apt install -y libasound2-plugins
+  log "PulseAudio enabled"
+  run apt install -y libasound2-plugins
   if [ -d /etc/profile.d ]; then
+    log "CMD: write /etc/profile.d/pulse.sh"
     printf "PULSE_SERVER=%s:%s\nexport PULSE_SERVER\n" "${CHROOT_PULSE_HOST}" "${CHROOT_PULSE_PORT}" > /etc/profile.d/pulse.sh
   fi
+  log "CMD: write /etc/asound.conf"
   {
     echo "pcm.!default { type pulse }"
     echo "ctl.!default { type pulse }"
     echo "pcm.pulse { type pulse }"
     echo "ctl.pulse { type pulse }"
   } > /etc/asound.conf
+else
+  log "PulseAudio disabled"
 fi
 
-echo "[Step 11] Locales"
+log "[Step 11] Locales"
 # Step 11: locales
-apt install -y locales
-locale-gen en_US.UTF-8
-update-locale LANG=en_US.UTF-8
+run apt install -y locales
+run locale-gen en_US.UTF-8
+run update-locale LANG=en_US.UTF-8
 
-echo "[Step 12] Desktop environment"
+log "[Step 12] Desktop environment"
 # Step 12: desktop environment
 case "${CHROOT_DESKTOP}" in
   lxde)
-    apt install -y desktop-base x11-xserver-utils xfonts-base xfonts-utils lxde lxde-common menu-xdg hicolor-icon-theme gtk2-engines
+    log "Desktop: lxde"
+    run apt install -y desktop-base x11-xserver-utils xfonts-base xfonts-utils lxde lxde-common menu-xdg hicolor-icon-theme gtk2-engines
+    log "CMD: write /home/${CHROOT_USER}/.xsession"
     echo 'exec startlxde' > "/home/${CHROOT_USER}/.xsession"
     if [ -e /etc/xdg/autostart/lxpolkit.desktop ]; then
-      rm /etc/xdg/autostart/lxpolkit.desktop
+      run rm /etc/xdg/autostart/lxpolkit.desktop
     fi
     if [ -e /usr/bin/lxpolkit ]; then
-      mv /usr/bin/lxpolkit /usr/bin/lxpolkit.bak
+      run mv /usr/bin/lxpolkit /usr/bin/lxpolkit.bak
     fi
-    chown "${CHROOT_USER}:${CHROOT_USER}" "/home/${CHROOT_USER}/.xsession"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
     ;;
   mate)
-    apt install -y desktop-base dbus-x11 x11-xserver-utils xfonts-base xfonts-utils mate-core
+    log "Desktop: mate"
+    run apt install -y desktop-base dbus-x11 x11-xserver-utils xfonts-base xfonts-utils mate-core
+    log "CMD: write /home/${CHROOT_USER}/.xsession"
     {
       echo 'XKL_XMODMAP_DISABLE=1'
       echo 'export XKL_XMODMAP_DISABLE'
       echo 'exec dbus-launch --exit-with-session mate-session'
     } > "/home/${CHROOT_USER}/.xsession"
-    chown "${CHROOT_USER}:${CHROOT_USER}" "/home/${CHROOT_USER}/.xsession"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
     ;;
   xterm)
-    apt install -y desktop-base x11-xserver-utils xfonts-base xfonts-utils xterm
+    log "Desktop: xterm"
+    run apt install -y desktop-base x11-xserver-utils xfonts-base xfonts-utils xterm
+    log "CMD: write /home/${CHROOT_USER}/.xsession"
     echo 'exec xterm -max' > "/home/${CHROOT_USER}/.xsession"
-    chown "${CHROOT_USER}:${CHROOT_USER}" "/home/${CHROOT_USER}/.xsession"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
     ;;
   xfce)
-    apt install -y desktop-base dbus-x11 x11-xserver-utils xfonts-base xfonts-utils xfce4 xfce4-terminal tango-icon-theme hicolor-icon-theme
+    log "Desktop: xfce"
+    run apt install -y desktop-base dbus-x11 x11-xserver-utils xfonts-base xfonts-utils xfce4 xfce4-terminal tango-icon-theme hicolor-icon-theme
+    log "CMD: write /home/${CHROOT_USER}/.xsession"
     echo 'exec dbus-launch --exit-with-session xfce4-session' > "/home/${CHROOT_USER}/.xsession"
-    chown "${CHROOT_USER}:${CHROOT_USER}" "/home/${CHROOT_USER}/.xsession"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
     ;;
   kde)
-    apt install -y kubuntu-desktop
+    log "Desktop: kde"
+    run apt install -y kubuntu-desktop
     ;;
   none)
+    log "Desktop: none"
     ;;
   *)
-    echo "Unknown CHROOT_DESKTOP='${CHROOT_DESKTOP}'. Use lxde, xfce, mate, xterm, kde, or none." >&2
+    log "ERROR: Unknown CHROOT_DESKTOP='${CHROOT_DESKTOP}'. Use lxde, xfce, mate, xterm, kde, or none."
     exit 1
     ;;
  esac
 
-  echo "[Step 12] VNC setup (optional)"
+  log "[Step 12] VNC setup (optional)"
   # Linux Deploy extra: vnc
   if [ "${CHROOT_VNC}" = "true" ]; then
-    apt install -y tightvncserver
+    log "VNC enabled"
+    run apt install -y tightvncserver
     vnc_home="/home/${CHROOT_USER}/.vnc"
-    mkdir -p "${vnc_home}"
+    run mkdir -p "${vnc_home}"
+    log "CMD: write VNC password"
     echo "${CHROOT_VNC_PASS}" | vncpasswd -f > "${vnc_home}/passwd" || true
-    chmod 600 "${vnc_home}/passwd"
-    ln -sf ../.xinitrc "${vnc_home}/xstartup"
-    chown -R "${CHROOT_USER}:${CHROOT_USER}" "${vnc_home}"
+    run chmod 600 "${vnc_home}/passwd"
+    run ln -sf ../.xinitrc "${vnc_home}/xstartup"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown -R "${CHROOT_USER}:${user_group}" "${vnc_home}"
     printf "VNC ready: :%s %sx%s depth %s\n" "${CHROOT_VNC_DISPLAY}" "${CHROOT_VNC_WIDTH}" "${CHROOT_VNC_HEIGHT}" "${CHROOT_VNC_DEPTH}"
+  else
+    log "VNC disabled"
   fi
 
-  echo "[Step 12] X11 setup (optional)"
+  log "[Step 12] X11 setup (optional)"
   # Linux Deploy extra: x11 hint
   if [ "${CHROOT_X11}" = "true" ]; then
     echo "X11 ready. Use: export DISPLAY=127.0.0.1:0"
+  else
+    log "X11 disabled"
   fi
 
-echo "[Step 13] Disable snapd"
+log "[Step 13] Disable snapd"
 # Step 13: disable snapd
-apt-get autopurge -y snapd || true
+run apt-get autopurge -y snapd || true
+log "CMD: write /etc/apt/preferences.d/nosnap.pref"
 cat <<'EOF' > /etc/apt/preferences.d/nosnap.pref
 # To prevent repository packages from triggering the installation of Snap,
 # this file forbids snapd from being installed by APT.

@@ -11,25 +11,22 @@
 
 - Initial setup script: docs/chroot_distro_ubuntu_init.sh
   - Runs inside chroot, applies base fixes, users, desktop, optional ssh/vnc/pulse
-- Host wrapper (start script)
-  - Mounts, starts services, launches desktop, then enters shell
-  - Keeps service start/stop and mounts out of the chroot itself
+- Start script / chd start
+  - Removed from default plan (user preference, not universal)
 
-## 3) New commands (alias: chd)
+## 3) Focus areas
 
-- chd start ubuntu
-  - Mount installed distro
-  - Run host wrapper (start script)
-  - Enter shell
+- chd login as primary entry point
+- Safe mount/unmount handling and idempotent behavior
+
+## 4) New commands (alias: chd)
 
 - chd login ubuntu
-  - Do not mount
-  - Enter shell only (avoid duplicate mounts/services)
+  - Mount if needed
+  - Enter shell
 
-- Alternative: merge behavior
-  - chd login ubuntu
-    - If not mounted -> mount + start script + shell
-    - If mounted -> shell only
+- chd umount ubuntu
+  - Safe unmount and cleanup
 
 - chd config
   - Create or edit .conf files
@@ -37,11 +34,10 @@
 - (deferred) chd setgpu ubuntu
   - Termux-only GPU acceleration setup
 
-## 4) Changed command behavior
+## 5) Changed command behavior
 
 - chd install ubuntu
   - Install
-  - Mount
+  - Img Mount
   - Run initial setup script
-  - Run start script
   - Enter shell

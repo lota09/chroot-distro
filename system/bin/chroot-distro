@@ -746,24 +746,31 @@ chroot_distro_list() {
   GREEN=$(printf '\033[32m')
   RESET=$(printf '\033[0m')
 
+    sanitize_var() {
+        printf "%s" "$1" | tr -c 'A-Za-z0-9_' '_'
+    }
+
   for file in "$chroot_distro_path/.rootfs/"*.tar.xz; do
     if [ -f "$file" ]; then
       name=$(basename "$file" .tar.xz)
-      eval "rootfs_map_${name}=1"
+            safe_name=$(sanitize_var "$name")
+            eval "rootfs_map_${safe_name}=1"
     fi
   done
 
   for file in "$chroot_distro_path/.backup/"*.tar.xz; do
     if [ -f "$file" ]; then
       name=$(basename "$file" .tar.xz)
-      eval "backup_map_${name}=1"
+            safe_name=$(sanitize_var "$name")
+            eval "backup_map_${safe_name}=1"
     fi
   done
 
   for dir in "$chroot_distro_path/"*/; do
     if [ -d "$dir" ]; then
       name=$(basename "$dir")
-      eval "installed_map_${name}=1"
+            safe_name=$(sanitize_var "$name")
+            eval "installed_map_${safe_name}=1"
     fi
   done
 
@@ -1830,6 +1837,16 @@ chroot_distro_unmount() {
     fi
     if [ "" != "$mounts" ] || [ "" != "$loopbacks" ] || [ "" != "$open_files" ] || [ "0" = "$system_mount_points_mounted" ]; then
         chroot_distro_list_unmount_issues "$distro_path" 'unmount' "$mode" "$force" "$mounts" "$loopbacks" "$open_files"
+        exit 1
+    fi
+
+    # Final safety check: ensure no mounts/loopbacks remain under distro_path
+    remaining_mounts=$(cat /proc/mounts | grep -F "$distro_path" || true)
+    remaining_loopbacks=$(losetup -a | grep -F "$distro_path" || true)
+    if [ -n "$remaining_mounts" ] || [ -n "$remaining_loopbacks" ]; then
+        print_message error "Unmount incomplete: mounts or loopbacks still present under $distro_path"
+        print_message info "mounts:\n${remaining_mounts:-Not found}"
+        print_message info "loopbacks:\n${remaining_loopbacks:-Not found}"
         exit 1
     fi
 }
