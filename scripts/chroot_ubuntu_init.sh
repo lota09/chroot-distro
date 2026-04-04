@@ -15,6 +15,10 @@ run() {
   "$@"
 }
 
+# Ensure standard paths are available inside a minimal rootfs.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 if command -v id >/dev/null 2>&1; then
   if [ "$(id -u)" -ne 0 ]; then
     log "ERROR: This script must run as root inside the chroot."

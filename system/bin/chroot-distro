@@ -56,8 +56,8 @@ else
     fi
 fi
 
-chroot_distro_image_file="${CHROOT_DISTRO_IMAGE_FILE:-}"
-chroot_distro_image_size="${CHROOT_DISTRO_IMAGE_SIZE:-}"
+chroot_distro_image_file=""
+chroot_distro_image_size=""
 
 script=$(basename "$0")
 
@@ -93,6 +93,8 @@ chroot_distro_mount_rootfs_image() {
             print_message note "Create it manually or set CHROOT_DISTRO_IMAGE_SIZE to auto-create."
             chroot_distro_exit 1
         fi
+    else
+        print_message info "Rootfs image exists, skipping create: $chroot_distro_image_file"
     fi
     mkdir -p "$chroot_distro_path"
     if ! mount -o rw,relatime "$chroot_distro_image_file" "$chroot_distro_path"; then
@@ -902,6 +904,13 @@ chroot_distro_resolve_instance() {
         . "$INSTANCE_CONF"
         INSTANCE_DISTRO="${DISTRIB:-$input}"
         INSTANCE_SUITE="${SUITE:-}"
+        if [ "${TARGET_TYPE:-file}" = "dir" ]; then
+            chroot_distro_image_file=""
+            chroot_distro_image_size=""
+        else
+            chroot_distro_image_file="${TARGET_PATH:-}"
+            chroot_distro_image_size="${DISK_SIZE:-}"
+        fi
         return 0
     fi
     INSTANCE_CONF=""
@@ -1256,7 +1265,7 @@ Distribution Management:
     remove <distro>             - Remove all instances and rootfs for a suite (suite-aware)
 
 Installation:
-    install [--no-init] <profile> - Install using a profile (.profile/<name>.conf)
+    install [--no-init] [--no-img] <profile> - Install using a profile (.profile/<name>.conf)
     uninstall <instance> [-f|--force] [--include-profile] - Uninstall an instance
                                 -f, --force       Force close open files and unmount
                                 --include-profile Remove instance config from .config
@@ -1311,7 +1320,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-  3.0.3 (Staging)
+  3.0.4 (Staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -2075,6 +2084,7 @@ prepare_chroot_distro() {
 chroot_distro_install() {
     input="$1"
     no_init="$2"
+    no_img="$3"
     profile_conf=""
     instance_name=""
     if profile_conf=$(chroot_distro_profile_resolve_conf "$input"); then
@@ -2093,6 +2103,16 @@ chroot_distro_install() {
         chroot_distro_exit 1
     fi
     chroot_distro_check_if_supported "$distro"
+
+    if [ "$no_img" = "yes" ] || [ "${TARGET_TYPE:-file}" = "dir" ]; then
+        chroot_distro_image_file=""
+        chroot_distro_image_size=""
+        print_message info "Image mode disabled for install"
+    else
+        chroot_distro_image_file="${TARGET_PATH:-}"
+        chroot_distro_image_size="${DISK_SIZE:-}"
+        print_message info "Image mode enabled: $chroot_distro_image_file (${chroot_distro_image_size})"
+    fi
 
     chroot_distro_download_if_needed "$distro" "$suite"
 
@@ -2828,13 +2848,18 @@ elif [ "$command" = "delete" ]; then
     fi
     chroot_distro_delete "$1"
 elif [ "$command" = "install" ]; then
-    PARSED=$(getopt --options= --longoptions=no-init --name "$0" -- "$@") || chroot_distro_exit 2
+    PARSED=$(getopt --options= --longoptions=no-init,no-img --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
     no_init=no
+    no_img=no
     while true; do
         case "$1" in
             --no-init)
                 no_init=yes
+                shift
+                ;;
+            --no-img)
+                no_img=yes
                 shift
                 ;;
             --)
@@ -2854,7 +2879,7 @@ elif [ "$command" = "install" ]; then
         chroot_distro_user_check_parameters
     fi
     chroot_distro_warn_if_unsupported_busybox
-    chroot_distro_install "$1" "$no_init"
+    chroot_distro_install "$1" "$no_init" "$no_img"
 elif [ "$command" = "uninstall" ]; then
     PARSED=$(getopt --options=f --longoptions=force,include-profile --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
