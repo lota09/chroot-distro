@@ -957,14 +957,15 @@ chroot_distro_init_run() {
     chroot_script="$chroot_init_dir/$script_name"
     chroot_conf="$chroot_init_dir/profile.conf"
 
-    if [ ! -f "$host_script" ]; then
-        if [ -f "$module_script" ]; then
-            mkdir -p "$chroot_distro_path/scripts"
+    if [ -f "$module_script" ]; then
+        mkdir -p "$chroot_distro_path/scripts"
+        if [ ! -f "$host_script" ] || ! cmp -s "$module_script" "$host_script"; then
             cp "$module_script" "$host_script"
-        else
-            print_message warning "Init script not found: $host_script"
-            return 1
+            print_message info "Init script synced: $host_script"
         fi
+    elif [ ! -f "$host_script" ]; then
+        print_message warning "Init script not found: $host_script"
+        return 1
     fi
     if [ ! -f "$conf_file" ]; then
         print_message warning "Init config not found: $conf_file"
@@ -1310,7 +1311,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-  3.0.2 (Staging)
+  3.0.3 (Staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
