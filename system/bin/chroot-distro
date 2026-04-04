@@ -78,7 +78,7 @@ chroot_distro_mount_rootfs_image() {
         if [ -n "$chroot_distro_image_size" ]; then
             print_message info "Creating rootfs image: $chroot_distro_image_file"
             mkdir -p "$(dirname "$chroot_distro_image_file")"
-            if ! truncate -S "$chroot_distro_image_size" "$chroot_distro_image_file"; then
+            if ! truncate -s "$chroot_distro_image_size" "$chroot_distro_image_file"; then
                 print_message error "Failed to create rootfs image with truncate"
                 chroot_distro_exit 1
             fi
@@ -1320,7 +1320,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-  3.0.4 (Staging)
+  3.0.6 (Staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -2114,9 +2114,10 @@ chroot_distro_install() {
         print_message info "Image mode enabled: $chroot_distro_image_file (${chroot_distro_image_size})"
     fi
 
-    chroot_distro_download_if_needed "$distro" "$suite"
-
     chroot_distro_mount_rootfs_image
+    mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
+
+    chroot_distro_download_if_needed "$distro" "$suite"
 
     archive_path="$(chroot_distro_rootfs_archive_path "$distro" "$suite")"
     if [ ! -f "$archive_path" ]; then
