@@ -82,10 +82,12 @@ chroot_distro_mount_rootfs_image() {
                 print_message error "Failed to create rootfs image with truncate"
                 chroot_distro_exit 1
             fi
+            print_message info "Rootfs image allocated (${chroot_distro_image_size})"
             if ! mke2fs -t ext4 "$chroot_distro_image_file"; then
                 print_message error "Failed to format rootfs image with ext4"
                 chroot_distro_exit 1
             fi
+            print_message info "Rootfs image formatted (ext4)"
         else
             print_message error "Rootfs image not found: $chroot_distro_image_file"
             print_message note "Create it manually or set CHROOT_DISTRO_IMAGE_SIZE to auto-create."
@@ -101,6 +103,7 @@ chroot_distro_mount_rootfs_image() {
             chroot_distro_exit 1
         fi
     fi
+    print_message info "Rootfs image mounted on $chroot_distro_path"
     mount -o remount,exec,suid,dev "$chroot_distro_path" >/dev/null 2>&1 || true
 }
 
@@ -930,6 +933,8 @@ chroot_distro_download_if_needed() {
     if [ ! -f "$archive_path" ]; then
         print_message info "Rootfs not found for '${distro}' ${suite:+($suite)}, starting download"
         chroot_distro_download "$distro" "$suite"
+    else
+        print_message info "Rootfs already present for '${distro}' ${suite:+($suite)}, skipping download"
     fi
 }
 
@@ -947,13 +952,19 @@ chroot_distro_init_run() {
     conf_file="$3"
     script_name="chroot_${distro}_init.sh"
     host_script="$chroot_distro_path/scripts/$script_name"
+    module_script="/data/adb/modules/chroot-distro/scripts/$script_name"
     chroot_init_dir="$distro_path/root/.chd-init"
     chroot_script="$chroot_init_dir/$script_name"
     chroot_conf="$chroot_init_dir/profile.conf"
 
     if [ ! -f "$host_script" ]; then
-        print_message warning "Init script not found: $host_script"
-        return 1
+        if [ -f "$module_script" ]; then
+            mkdir -p "$chroot_distro_path/scripts"
+            cp "$module_script" "$host_script"
+        else
+            print_message warning "Init script not found: $host_script"
+            return 1
+        fi
     fi
     if [ ! -f "$conf_file" ]; then
         print_message warning "Init config not found: $conf_file"
@@ -1297,6 +1308,9 @@ Warning:
 
 License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
+
+Version:
+  3.0.2 (Staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -1668,6 +1682,7 @@ chroot_distro_download() {
         fi
         chroot_distro_exit 88
     fi
+    print_message info "Rootfs downloaded: $archive_path"
 }
 
 chroot_distro_find_processes_with_open_files() {
@@ -1712,6 +1727,7 @@ chroot_distro_delete() {
     archive_path=$(chroot_distro_rootfs_archive_path "$distro" "$suite_normalized")
     if [ -f "$archive_path" ]; then
         rm "$archive_path"
+        print_message info "Rootfs deleted for '${distro}' (${suite_selected})"
     else
         print_message error "The rootfs for '${distro}' (${suite_selected}) has not been downloaded."
         print_message note "Use '${script} download ${distro}' to download it."
@@ -2121,6 +2137,7 @@ chroot_distro_install() {
             print_message error "Failed to unpack the '${distro}' rootfs archive. The archive may be corrupted or incomplete."
             chroot_distro_exit 5
         fi
+        print_message info "Rootfs unpacked to: $distro_path"
     else
         mkdir -p "$distro_path"
         tar -xf "$archive_path" -C "$chroot_distro_path/"
@@ -2137,10 +2154,13 @@ chroot_distro_install() {
         fi
         mv "$chroot_distro_path/$rootdir"/* "$distro_path"/
         rmdir "$chroot_distro_path/$rootdir" 2>/dev/null
+        print_message info "Rootfs unpacked to: $distro_path"
     fi
 
     chroot_distro_mount_system_points "$distro_path" 
+    print_message info "System mount points ready"
     prepare_chroot_distro "$distro_path" 
+    print_message info "Base chroot preparation complete"
 
     install_conf_path=""
     if [ -n "$profile_conf" ]; then
@@ -2155,7 +2175,11 @@ chroot_distro_install() {
 
     if [ "$no_init" != "yes" ] && chroot_distro_init_supported "$distro"; then
         if [ -n "$install_conf_path" ]; then
-            chroot_distro_init_run "$distro" "$distro_path" "$install_conf_path"
+            if chroot_distro_init_run "$distro" "$distro_path" "$install_conf_path"; then
+                print_message info "Init completed"
+            else
+                print_message warning "Init did not complete cleanly"
+            fi
         else
             print_message warning "Init skipped: no config available for ${distro}"
         fi
@@ -2235,6 +2259,9 @@ chroot_distro_uninstall() {
             if [ -f "$chroot_distro_path/.config/${INSTANCE_NAME}.conf" ]; then
                 rm "$chroot_distro_path/.config/${INSTANCE_NAME}.conf"
             fi
+            print_message info "Uninstalled instance '${INSTANCE_NAME}' and removed its config."
+        else
+            print_message info "Uninstalled instance '${INSTANCE_NAME}'."
         fi
     else
         print_message error "${INSTANCE_NAME} not installed"
@@ -2308,6 +2335,7 @@ chroot_distro_backup() {
                 print_message error "Failed to create the backup."
                 chroot_distro_exit 5
             fi
+            print_message info "Backup created: $backup_path"
         )
     else
         absolute_custom_path="$custom_path"
@@ -2325,6 +2353,7 @@ chroot_distro_backup() {
                 print_message error "Failed to create the backup."
                 chroot_distro_exit 5
             fi
+            print_message info "Backup created: $absolute_custom_path"
         )
     fi
 }
@@ -2358,6 +2387,7 @@ chroot_distro_unbackup() {
     backup_path="$chroot_distro_path/.backup/$1.tar.xz"
     if [ -f "$backup_path" ]; then
         rm "$backup_path"
+        print_message info "Backup removed: $backup_path"
     else
         print_message error "No backup found for instance '$1'."
         print_message note "You can use '$script backup $1' to create one."
@@ -2424,12 +2454,14 @@ chroot_distro_restore() {
                 print_message error "Failed to unpack the archive."
                 chroot_distro_exit 5
             fi
+            print_message info "Restore completed for $instance"
         else
             mkdir -p "$distro_path"
             if ! tar -xf "$backup_path" -C "$distro_path/" 2>/dev/null; then
                 print_message error "Failed to unpack the archive."
                 chroot_distro_exit 5
             fi
+            print_message info "Restore completed for $instance"
         fi
     elif [ "data" = "$rootdir" ] && [ "yes" = "$force" ]; then
         # Uses old format of backups. Accept only if user has reviewed the content as the backup needs to be
@@ -2442,6 +2474,7 @@ chroot_distro_restore() {
                 print_message error "Failed to unpack the archive."
                 chroot_distro_exit 5
             fi
+            print_message info "Restore completed for $instance"
         )
     elif [ "data" = "$rootdir" ]; then
         print_message note "Will restore from root directory, review the contents and use --force."
@@ -2462,6 +2495,7 @@ points will be shadowed by system mounts."
                 print_message error "Failed to unpack the archive."
                 chroot_distro_exit 5
             fi
+            print_message info "Restore completed for $instance"
         )
     else
         print_message error "Backup may be for wrong instance (root directory $rootdir), review the backup before proceeding"
@@ -2559,6 +2593,8 @@ chroot_distro_unmount() {
         print_message info "loopbacks:\n${remaining_loopbacks:-Not found}"
         exit 1
     fi
+
+    print_message info "Unmount complete for $INSTANCE_NAME"
 }
 
 chroot_distro_command() {
@@ -2687,6 +2723,7 @@ chroot_distro_remove() {
     archive_path=$(chroot_distro_rootfs_archive_path "$distro" "$suite_normalized")
     if [ -f "$archive_path" ]; then
         rm "$archive_path"
+        print_message info "Rootfs removed for '${distro}' (${suite_selected})"
     fi
 }
 

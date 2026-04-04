@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-DEBUG_TRACE="${DEBUG_TRACE:-true}"
+DEBUG_TRACE="${DEBUG_TRACE:-false}"
 if [ "${DEBUG_TRACE}" = "true" ]; then
   set -x
 fi
@@ -15,9 +15,13 @@ run() {
   "$@"
 }
 
-if [ "$(id -u)" -ne 0 ]; then
-  log "ERROR: This script must run as root inside the chroot."
-  exit 1
+if command -v id >/dev/null 2>&1; then
+  if [ "$(id -u)" -ne 0 ]; then
+    log "ERROR: This script must run as root inside the chroot."
+    exit 1
+  fi
+else
+  log "WARN: 'id' not found; assuming root inside chroot."
 fi
 
 conf_file=""
@@ -108,6 +112,34 @@ log "CMD: write /etc/resolv.conf"
 printf "nameserver 8.8.8.8\n" > /etc/resolv.conf
 log "CMD: write /etc/hosts"
 printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
+
+ensure_base_tools() {
+  need_install=""
+  for cmd in id getent groupadd usermod adduser; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      need_install="yes"
+      break
+    fi
+  done
+  if [ -z "$need_install" ]; then
+    return 0
+  fi
+
+  if command -v apt-get >/dev/null 2>&1; then
+    log "Installing base tools (coreutils, passwd, adduser, libc-bin)"
+    apt-get update
+    apt-get install -y coreutils passwd adduser libc-bin
+  elif command -v apt >/dev/null 2>&1; then
+    log "Installing base tools (coreutils, passwd, adduser, libc-bin)"
+    apt update
+    apt install -y coreutils passwd adduser libc-bin
+  else
+    log "ERROR: apt/apt-get not found; cannot install required tools."
+    exit 1
+  fi
+}
+
+ensure_base_tools
 
 if getent group aid_inet >/dev/null 2>&1; then
   log "aid_inet group already exists"
