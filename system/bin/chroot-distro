@@ -1835,10 +1835,12 @@ chroot_distro_mount_system_points() {
         mount_android_dirs
     fi
     if [ "1" = "$ram_bind_val" ]; then
-        system_points="$system_points /tmp /run /var/tmp /dev/shm"
+        for d in /tmp /run /var/tmp /dev/shm; do
+            echo " $system_points " | grep -q " $d " || system_points="$system_points $d"
+        done
     fi
     if [ -f "${distro_path}/usr/bin/pacman" ] || [ -f "${distro_path}/bin/pacman" ] || [ -f "${distro_path}/usr/local/bin/pacman" ]; then
-        system_points="${distro_path} ${system_points}"
+        echo " $system_points " | grep -q " ${distro_path} " || system_points="${distro_path} ${system_points}"
     fi
     for point in $system_points; do
         chroot_distro_mount_system_point "$distro_path" "$point" "$distro_path$point"
@@ -1868,9 +1870,24 @@ chroot_distro_unmount_system_point() {
 chroot_distro_unmount_system_points() {
     distro_path="$1"
     force="$2"
-    system_points=$(echo $system_points | tr ' ' '\n' | sort -r | tr '\n' ' ')
+    if [ "1" = "$android_bind_val" ]; then
+        mount_android_dirs
+    fi
+    if [ "1" = "$ram_bind_val" ]; then
+        for d in /tmp /run /var/tmp /dev/shm; do
+            echo " $system_points " | grep -q " $d " || system_points="$system_points $d"
+        done
+    fi
+    if [ -f "${distro_path}/usr/bin/pacman" ] || [ -f "${distro_path}/bin/pacman" ] || [ -f "${distro_path}/usr/local/bin/pacman" ]; then
+        echo " $system_points " | grep -q " ${distro_path} " || system_points="${distro_path} ${system_points}"
+    fi
+    system_points=$(echo $system_points | tr ' ' '\n' | sort -ru | tr '\n' ' ')
     for point in $system_points; do
-        chroot_distro_unmount_system_point "$distro_path$point" "$force"
+        if [ "$point" = "$distro_path" ]; then
+            chroot_distro_unmount_system_point "$distro_path" "$force"
+        else
+            chroot_distro_unmount_system_point "$distro_path$point" "$force"
+        fi
     done
 } 
 
@@ -2023,7 +2040,6 @@ prepare_chroot_distro() {
       {
        echo "3003 aid_inet"
        echo "3004 aid_net_raw"
-       echo "1003 aid_graphics"
        echo "1003 aid_graphics"
        echo "1004 aid_input"
        echo "1005 aid_audio"
@@ -2278,7 +2294,7 @@ chroot_distro_backup() {
         backup_path="$chroot_distro_path/.backup/$INSTANCE_NAME.tar.xz"
         if [ -f "$backup_path" ]; then
             print_message error "Backup already exists."
-            print_message note "You can use '\$script unbackup \$INSTANCE_NAME' to unbackup it."
+            print_message note "You can use '$script unbackup $INSTANCE_NAME' to unbackup it."
             chroot_distro_exit 1
         fi
         backup_items="$INSTANCE_NAME"
@@ -2343,7 +2359,7 @@ chroot_distro_unbackup() {
         rm "$backup_path"
     else
         print_message error "No backup found for instance '$1'."
-        print_message note "You can use '\$script backup \$1' to create one."
+        print_message note "You can use '$script backup $1' to create one."
         chroot_distro_exit 1
     fi
 }
@@ -2356,7 +2372,7 @@ chroot_distro_restore() {
     distro_path="$chroot_distro_path/$instance"
     if [ -d "$distro_path" ]; then
         print_message error "The instance '$instance' already installed."
-        print_message note "You can use '\$script uninstall \$instance' to uninstall the instance."
+        print_message note "You can use '$script uninstall $instance' to uninstall the instance."
         chroot_distro_exit 1
     fi
 
@@ -2373,7 +2389,7 @@ chroot_distro_restore() {
 
     if [ ! -f "$backup_path" ]; then
         print_message error "Backup not found."
-        print_message note "You can use '\$script backup \$instance' to create a backup."
+        print_message note "You can use '$script backup $instance' to create a backup."
         chroot_distro_exit 1
     fi
 
@@ -2553,7 +2569,7 @@ chroot_distro_command() {
     distro_path="$chroot_distro_path/$INSTANCE_NAME"
     if [ ! -d "$distro_path" ]; then
         print_message error "The instance '$INSTANCE_NAME' is not installed."
-        print_message note "You can use '\$script install $INSTANCE_NAME' to install the instance."
+        print_message note "You can use '$script install $INSTANCE_NAME' to install the instance."
         chroot_distro_exit 1
     fi
 
@@ -2569,7 +2585,7 @@ chroot_distro_login() {
     distro_path="$chroot_distro_path/$INSTANCE_NAME"
     if [ ! -d "$distro_path" ]; then
         print_message error "The instance '$INSTANCE_NAME' is not installed."
-        print_message note "You can use '\$script install $INSTANCE_NAME' to install the instance."
+        print_message note "You can use '$script install $INSTANCE_NAME' to install the instance."
         chroot_distro_exit 1
     fi
 

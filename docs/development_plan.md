@@ -6,6 +6,22 @@
 - Safe stop/unmount: full cleanup without system damage
 - Termux GPU setup: host + chroot wiring for acceleration (termux-only)
 
+## 2) Background and goals
+
+### Limitations of the old distro-centric flow
+
+- One distro (ubuntu) could not host multiple suites (focal/noble/etc) at the same time.
+- One suite (noble) could not host multiple instances at the same time.
+- On Samsung devices, non-image installs are constrained by FBE, which blocks system-level setup inside the chroot
+  (notably _apt group fixes, which breaks apt).
+
+### Development direction
+
+- Adopted Linux Deploy-style profile-based instance management using conf files.
+- Automated first-boot setup per suite, inspired by Linux Deploy init,
+  so users do not need to manually install required packages or apply system settings
+  (SSH/VNC, _apt group fixes, user creation, etc.).
+
 ## 3) Focus areas
 
 - chd login as primary entry point
