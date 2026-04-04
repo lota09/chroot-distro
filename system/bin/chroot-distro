@@ -78,11 +78,16 @@ chroot_distro_mount_rootfs_image() {
         if [ -n "$chroot_distro_image_size" ]; then
             print_message info "Creating rootfs image: $chroot_distro_image_file"
             mkdir -p "$(dirname "$chroot_distro_image_file")"
-            if ! truncate -s "$chroot_distro_image_size" "$chroot_distro_image_file"; then
+            size_arg="$chroot_distro_image_size"
+            case "$chroot_distro_image_size" in
+                *[KkMmGgTtPpEe]) size_arg="$chroot_distro_image_size" ;;
+                *[0-9]) size_arg="${chroot_distro_image_size}M" ;;
+            esac
+            if ! truncate -s "$size_arg" "$chroot_distro_image_file"; then
                 print_message error "Failed to create rootfs image with truncate"
                 chroot_distro_exit 1
             fi
-            print_message info "Rootfs image allocated (${chroot_distro_image_size})"
+            print_message info "Rootfs image allocated (${size_arg})"
             if ! mke2fs -t ext4 "$chroot_distro_image_file"; then
                 print_message error "Failed to format rootfs image with ext4"
                 chroot_distro_exit 1
@@ -492,29 +497,50 @@ fi
 
 mkdir -p "$chroot_distro_path"
 chroot_distro_mount_rootfs_image
-mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
+mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup"
 
-fix_suid_file="$chroot_distro_path/.config/fix_suid"
+config_dir="$chroot_distro_path/.config"
+config_writable=true
+if ! mkdir -p "$config_dir" 2>/dev/null; then
+    config_writable=""
+fi
+if [ -n "$config_writable" ]; then
+    test_file="$config_dir/.write_test.$$"
+    if ! ( : > "$test_file" ) 2>/dev/null; then
+        config_writable=""
+    else
+        rm -f "$test_file"
+    fi
+fi
+if [ -z "$config_writable" ]; then
+    print_message warning "Config directory is not writable; using defaults."
+fi
+
+fix_suid_file="$config_dir/fix_suid"
 
 fix_suid() {
     fix_suid_val=$(cat "$fix_suid_file" 2>/dev/null)
 
-    # If the argument is "enable", write 1 to the fix suid file
-    if [ "$1" = "enable" ]; then
-        if [ "$fix_suid_val" != "1" ]; then
-            echo 1 > "$fix_suid_file"
-        else
-            print_message warning "fix suid is enabled already"
-            return 1
+    if [ -n "$config_writable" ]; then
+        # If the argument is "enable", write 1 to the fix suid file
+        if [ "$1" = "enable" ]; then
+            if [ "$fix_suid_val" != "1" ]; then
+                echo 1 > "$fix_suid_file"
+            else
+                print_message warning "fix suid is enabled already"
+                return 1
+            fi
+        # If the argument is "disable", write 0 to the fix suid file
+        elif [ "$1" = "disable" ]; then
+            if [ "$fix_suid_val" != "0" ]; then
+                echo 0 > "$fix_suid_file"
+            else
+                print_message warning "fix suid is disabled already"
+                return 1
+            fi
         fi
-    # If the argument is "disable", write 0 to the fix suid file
-    elif [ "$1" = "disable" ]; then
-        if [ "$fix_suid_val" != "0" ]; then
-            echo 0 > "$fix_suid_file"
-        else
-            print_message warning "fix suid is disabled already"
-            return 1
-        fi
+    elif [ -z "$fix_suid_val" ]; then
+        fix_suid_val=1
     fi
     if [ "${CHROOT_DISTRO_MOUNT:-}" = "false" ]; then
        return
@@ -536,34 +562,38 @@ fix_suid() {
 }
 
 # Check if the fix suid file exists; if not, create it and set value to 1
-if [ ! -f "$chroot_distro_path/.config/fix_suid" ]; then
+if [ -n "$config_writable" ] && [ ! -f "$fix_suid_file" ]; then
     fix_suid enable
 fi
 
 fix_suid
 
-ram_bind_file="$chroot_distro_path/.config/ram_bind"
+ram_bind_file="$config_dir/ram_bind"
 ram_bind_val=""
 
 ram_bind() {
     ram_bind_val=$(cat "$ram_bind_file" 2>/dev/null)
 
-    # If the argument is "enable", write 1 to the ram bind file
-    if [ "$1" = "enable" ]; then
-        if [ "$ram_bind_val" != "1" ]; then
-            echo 1 > "$ram_bind_file"
-        else
-            print_message warning "ram bind is enabled already"
-            return 1
+    if [ -n "$config_writable" ]; then
+        # If the argument is "enable", write 1 to the ram bind file
+        if [ "$1" = "enable" ]; then
+            if [ "$ram_bind_val" != "1" ]; then
+                echo 1 > "$ram_bind_file"
+            else
+                print_message warning "ram bind is enabled already"
+                return 1
+            fi
+        # If the argument is "disable", write 0 to the ram bind file
+        elif [ "$1" = "disable" ]; then
+            if [ "$ram_bind_val" != "0" ]; then
+                echo 0 > "$ram_bind_file"
+            else
+                print_message warning "ram bind is disabled already"
+                return 1
+            fi
         fi
-    # If the argument is "disable", write 0 to the ram bind file
-    elif [ "$1" = "disable" ]; then
-        if [ "$ram_bind_val" != "0" ]; then
-            echo 0 > "$ram_bind_file"
-        else
-            print_message warning "ram bind is disabled already"
-            return 1
-        fi
+    elif [ -z "$ram_bind_val" ]; then
+        ram_bind_val=1
     fi
 
     # Re-read the value from the ram bind file
@@ -571,34 +601,38 @@ ram_bind() {
 
 }
 
-if [ ! -f "$chroot_distro_path/.config/ram_bind" ]; then
+if [ -n "$config_writable" ] && [ ! -f "$ram_bind_file" ]; then
     ram_bind enable
 fi
 
 ram_bind
 
-android_bind_file="$chroot_distro_path/.config/android_bind"
+android_bind_file="$config_dir/android_bind"
 android_bind_val=""
 
 android_bind() {
     android_bind_val=$(cat "$android_bind_file" 2>/dev/null)
 
-    # If the argument is "enable", write 1 to the android bind file
-    if [ "$1" = "enable" ]; then
-        if [ "$android_bind_val" != "1" ]; then
-            echo 1 > "$android_bind_file"
-        else
-            print_message warning "android bind is enabled already"
-            return 1
+    if [ -n "$config_writable" ]; then
+        # If the argument is "enable", write 1 to the android bind file
+        if [ "$1" = "enable" ]; then
+            if [ "$android_bind_val" != "1" ]; then
+                echo 1 > "$android_bind_file"
+            else
+                print_message warning "android bind is enabled already"
+                return 1
+            fi
+        # If the argument is "disable", write 0 to the android bind file
+        elif [ "$1" = "disable" ]; then
+            if [ "$android_bind_val" != "0" ]; then
+                echo 0 > "$android_bind_file"
+            else
+                print_message warning "android bind is disabled already"
+                return 1
+            fi
         fi
-    # If the argument is "disable", write 0 to the android bind file
-    elif [ "$1" = "disable" ]; then
-        if [ "$android_bind_val" != "0" ]; then
-            echo 0 > "$android_bind_file"
-        else
-            print_message warning "android bind is disabled already"
-            return 1
-        fi
+    elif [ -z "$android_bind_val" ]; then
+        android_bind_val=1
     fi
 
     # Re-read the value from the android bind file
@@ -607,12 +641,9 @@ android_bind() {
 }
 
 if [ "${operating_system}" != "GNU/Linux" ] && [ "${operating_system}" != "Linux" ]; then
-    if [ ! -f "$chroot_distro_path/.config/android_bind" ]; then
+    if [ -n "$config_writable" ] && [ ! -f "$android_bind_file" ]; then
         android_bind enable
     fi
-fi
-
-if [ "${operating_system}" != "GNU/Linux" ] && [ "${operating_system}" != "Linux" ]; then
     android_bind
 else
     android_bind_val=0
@@ -2252,7 +2283,9 @@ Please note, that using --force option may close more programs than intended, so
 
 chroot_distro_uninstall() {
     chroot_distro_resolve_instance "$1"
-    chroot_distro_check_if_supported "$INSTANCE_DISTRO"
+    if [ -n "${INSTANCE_CONF:-}" ]; then
+        chroot_distro_check_if_supported "$INSTANCE_DISTRO"
+    fi
 
     distro_path="$chroot_distro_path/$INSTANCE_NAME"
     force=$2
@@ -2561,7 +2594,9 @@ chroot_distro_unmount() {
     fi
 
     chroot_distro_resolve_instance "$distro"
-    chroot_distro_check_if_supported "$INSTANCE_DISTRO"
+    if [ -n "${INSTANCE_CONF:-}" ]; then
+        chroot_distro_check_if_supported "$INSTANCE_DISTRO"
+    fi
 
     distro_path="$chroot_distro_path/$INSTANCE_NAME"
     if [ ! -d "$distro_path" ]; then
