@@ -1351,7 +1351,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-  3.0.6 (Staging)
+    3.0.8 (Staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -2310,6 +2310,17 @@ chroot_distro_uninstall() {
         # ensure that there is no symbolic links before nuking the rootfs, symbolic links may point outside of rootfs when outside of the chroot
         find "$distro_path" -type l -exec "${busyboxpath}" unlink {} \; > /dev/null 2>&1
         rm -rf "$distro_path"
+
+        # Delete associated image file if it exists (only if TARGET_TYPE is not 'dir')
+        if [ -n "$INSTANCE_CONF" ]; then
+            # shellcheck disable=SC1090
+            . "$INSTANCE_CONF"
+            if [ "${TARGET_TYPE:-file}" != "dir" ] && [ -n "${TARGET_PATH:-}" ] && [ -f "${TARGET_PATH}" ]; then
+                rm -f "${TARGET_PATH}"
+                print_message info "Deleted image file: ${TARGET_PATH}"
+            fi
+        fi
+
         if [ "$include_profile" = "yes" ]; then
             if [ -f "$chroot_distro_path/.config/${INSTANCE_NAME}.conf" ]; then
                 rm "$chroot_distro_path/.config/${INSTANCE_NAME}.conf"
