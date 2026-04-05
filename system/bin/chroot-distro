@@ -56,8 +56,8 @@ else
     fi
 fi
 
-chroot_distro_image_file="${CHROOT_DISTRO_IMAGE_FILE:-}"
-chroot_distro_image_size="${CHROOT_DISTRO_IMAGE_SIZE:-}"
+chroot_distro_image_file=""
+chroot_distro_image_size=""
 
 script=$(basename "$0")
 
@@ -68,40 +68,53 @@ if [ "${user_id}" -ne 0 ]; then
 fi
 
 chroot_distro_mount_rootfs_image() {
+    # Mount the currently selected image file onto the given mount point.
+    # Usage: chroot_distro_mount_rootfs_image [mount_point]
+    mount_point="${1:-$chroot_distro_path}"
     if [ -z "$chroot_distro_image_file" ]; then
         return
     fi
-    if grep -wq "$chroot_distro_path" /proc/mounts; then
+    if grep -wq "$mount_point" /proc/mounts; then
         return
     fi
     if [ ! -f "$chroot_distro_image_file" ]; then
         if [ -n "$chroot_distro_image_size" ]; then
             print_message info "Creating rootfs image: $chroot_distro_image_file"
             mkdir -p "$(dirname "$chroot_distro_image_file")"
-            if ! truncate -S "$chroot_distro_image_size" "$chroot_distro_image_file"; then
+            size_arg="$chroot_distro_image_size"
+            case "$chroot_distro_image_size" in
+                *[KkMmGgTtPpEe]) size_arg="$chroot_distro_image_size" ;;
+                *[0-9]) size_arg="${chroot_distro_image_size}M" ;;
+            esac
+            if ! truncate -s "$size_arg" "$chroot_distro_image_file"; then
                 print_message error "Failed to create rootfs image with truncate"
                 chroot_distro_exit 1
             fi
+            print_message info "Rootfs image allocated (${size_arg})"
             if ! mke2fs -t ext4 "$chroot_distro_image_file"; then
                 print_message error "Failed to format rootfs image with ext4"
                 chroot_distro_exit 1
             fi
+            print_message info "Rootfs image formatted (ext4)"
         else
             print_message error "Rootfs image not found: $chroot_distro_image_file"
             print_message note "Create it manually or set CHROOT_DISTRO_IMAGE_SIZE to auto-create."
             chroot_distro_exit 1
         fi
+    else
+        print_message info "Rootfs image exists, skipping create: $chroot_distro_image_file"
     fi
-    mkdir -p "$chroot_distro_path"
-    if ! mount -o rw,relatime "$chroot_distro_image_file" "$chroot_distro_path"; then
+    mkdir -p "$mount_point"
+    if ! mount -o rw,relatime "$chroot_distro_image_file" "$mount_point"; then
         # Some Android builds require an explicit filesystem type and loop option for images.
-        if ! mount -t ext4 -o loop,rw,relatime "$chroot_distro_image_file" "$chroot_distro_path"; then
-            print_message error "Failed to mount rootfs image on $chroot_distro_path"
+        if ! mount -t ext4 -o loop,rw,relatime "$chroot_distro_image_file" "$mount_point"; then
+            print_message error "Failed to mount rootfs image on $mount_point"
             print_message note "If this is a new image, format it first: mke2fs -t ext4 $chroot_distro_image_file"
             chroot_distro_exit 1
         fi
     fi
-    mount -o remount,exec,suid,dev "$chroot_distro_path" >/dev/null 2>&1 || true
+    print_message info "Rootfs image mounted on $mount_point"
+    mount -o remount,exec,suid,dev "$mount_point" >/dev/null 2>&1 || true
 }
 
 architecture=$(uname -m)
@@ -486,30 +499,50 @@ if ! tar --help 2>&1 | grep -q -- "-J" ; then
 fi
 
 mkdir -p "$chroot_distro_path"
-chroot_distro_mount_rootfs_image
-mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
+mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup"
 
-fix_suid_file="$chroot_distro_path/.config/fix_suid"
+config_dir="$chroot_distro_path/.config"
+config_writable=true
+if ! mkdir -p "$config_dir" 2>/dev/null; then
+    config_writable=""
+fi
+if [ -n "$config_writable" ]; then
+    test_file="$config_dir/.write_test.$$"
+    if ! ( : > "$test_file" ) 2>/dev/null; then
+        config_writable=""
+    else
+        rm -f "$test_file"
+    fi
+fi
+if [ -z "$config_writable" ]; then
+    print_message warning "Config directory is not writable; using defaults."
+fi
+
+fix_suid_file="$config_dir/fix_suid"
 
 fix_suid() {
     fix_suid_val=$(cat "$fix_suid_file" 2>/dev/null)
 
-    # If the argument is "enable", write 1 to the fix suid file
-    if [ "$1" = "enable" ]; then
-        if [ "$fix_suid_val" != "1" ]; then
-            echo 1 > "$fix_suid_file"
-        else
-            print_message warning "fix suid is enabled already"
-            return 1
+    if [ -n "$config_writable" ]; then
+        # If the argument is "enable", write 1 to the fix suid file
+        if [ "$1" = "enable" ]; then
+            if [ "$fix_suid_val" != "1" ]; then
+                echo 1 > "$fix_suid_file"
+            else
+                print_message warning "fix suid is enabled already"
+                return 1
+            fi
+        # If the argument is "disable", write 0 to the fix suid file
+        elif [ "$1" = "disable" ]; then
+            if [ "$fix_suid_val" != "0" ]; then
+                echo 0 > "$fix_suid_file"
+            else
+                print_message warning "fix suid is disabled already"
+                return 1
+            fi
         fi
-    # If the argument is "disable", write 0 to the fix suid file
-    elif [ "$1" = "disable" ]; then
-        if [ "$fix_suid_val" != "0" ]; then
-            echo 0 > "$fix_suid_file"
-        else
-            print_message warning "fix suid is disabled already"
-            return 1
-        fi
+    elif [ -z "$fix_suid_val" ]; then
+        fix_suid_val=1
     fi
     if [ "${CHROOT_DISTRO_MOUNT:-}" = "false" ]; then
        return
@@ -531,34 +564,38 @@ fix_suid() {
 }
 
 # Check if the fix suid file exists; if not, create it and set value to 1
-if [ ! -f "$chroot_distro_path/.config/fix_suid" ]; then
+if [ -n "$config_writable" ] && [ ! -f "$fix_suid_file" ]; then
     fix_suid enable
 fi
 
 fix_suid
 
-ram_bind_file="$chroot_distro_path/.config/ram_bind"
+ram_bind_file="$config_dir/ram_bind"
 ram_bind_val=""
 
 ram_bind() {
     ram_bind_val=$(cat "$ram_bind_file" 2>/dev/null)
 
-    # If the argument is "enable", write 1 to the ram bind file
-    if [ "$1" = "enable" ]; then
-        if [ "$ram_bind_val" != "1" ]; then
-            echo 1 > "$ram_bind_file"
-        else
-            print_message warning "ram bind is enabled already"
-            return 1
+    if [ -n "$config_writable" ]; then
+        # If the argument is "enable", write 1 to the ram bind file
+        if [ "$1" = "enable" ]; then
+            if [ "$ram_bind_val" != "1" ]; then
+                echo 1 > "$ram_bind_file"
+            else
+                print_message warning "ram bind is enabled already"
+                return 1
+            fi
+        # If the argument is "disable", write 0 to the ram bind file
+        elif [ "$1" = "disable" ]; then
+            if [ "$ram_bind_val" != "0" ]; then
+                echo 0 > "$ram_bind_file"
+            else
+                print_message warning "ram bind is disabled already"
+                return 1
+            fi
         fi
-    # If the argument is "disable", write 0 to the ram bind file
-    elif [ "$1" = "disable" ]; then
-        if [ "$ram_bind_val" != "0" ]; then
-            echo 0 > "$ram_bind_file"
-        else
-            print_message warning "ram bind is disabled already"
-            return 1
-        fi
+    elif [ -z "$ram_bind_val" ]; then
+        ram_bind_val=1
     fi
 
     # Re-read the value from the ram bind file
@@ -566,34 +603,38 @@ ram_bind() {
 
 }
 
-if [ ! -f "$chroot_distro_path/.config/ram_bind" ]; then
+if [ -n "$config_writable" ] && [ ! -f "$ram_bind_file" ]; then
     ram_bind enable
 fi
 
 ram_bind
 
-android_bind_file="$chroot_distro_path/.config/android_bind"
+android_bind_file="$config_dir/android_bind"
 android_bind_val=""
 
 android_bind() {
     android_bind_val=$(cat "$android_bind_file" 2>/dev/null)
 
-    # If the argument is "enable", write 1 to the android bind file
-    if [ "$1" = "enable" ]; then
-        if [ "$android_bind_val" != "1" ]; then
-            echo 1 > "$android_bind_file"
-        else
-            print_message warning "android bind is enabled already"
-            return 1
+    if [ -n "$config_writable" ]; then
+        # If the argument is "enable", write 1 to the android bind file
+        if [ "$1" = "enable" ]; then
+            if [ "$android_bind_val" != "1" ]; then
+                echo 1 > "$android_bind_file"
+            else
+                print_message warning "android bind is enabled already"
+                return 1
+            fi
+        # If the argument is "disable", write 0 to the android bind file
+        elif [ "$1" = "disable" ]; then
+            if [ "$android_bind_val" != "0" ]; then
+                echo 0 > "$android_bind_file"
+            else
+                print_message warning "android bind is disabled already"
+                return 1
+            fi
         fi
-    # If the argument is "disable", write 0 to the android bind file
-    elif [ "$1" = "disable" ]; then
-        if [ "$android_bind_val" != "0" ]; then
-            echo 0 > "$android_bind_file"
-        else
-            print_message warning "android bind is disabled already"
-            return 1
-        fi
+    elif [ -z "$android_bind_val" ]; then
+        android_bind_val=1
     fi
 
     # Re-read the value from the android bind file
@@ -602,12 +643,9 @@ android_bind() {
 }
 
 if [ "${operating_system}" != "GNU/Linux" ] && [ "${operating_system}" != "Linux" ]; then
-    if [ ! -f "$chroot_distro_path/.config/android_bind" ]; then
+    if [ -n "$config_writable" ] && [ ! -f "$android_bind_file" ]; then
         android_bind enable
     fi
-fi
-
-if [ "${operating_system}" != "GNU/Linux" ] && [ "${operating_system}" != "Linux" ]; then
     android_bind
 else
     android_bind_val=0
@@ -623,6 +661,621 @@ chroot_distro_warn_if_unsupported_busybox() {
     fi
 }
 
+profile_log() {
+    print_message info "$*"
+}
+
+profile_prompt_default() {
+    prompt="$1"
+    default="$2"
+    if [ -n "$default" ]; then
+        printf "%s [%s]: " "$prompt" "$default" >&2
+    else
+        printf "%s: " "$prompt" >&2
+    fi
+    IFS= read -r value
+    if [ -z "$value" ]; then
+        value="$default"
+    fi
+    printf "%s" "$value"
+}
+
+profile_prompt_yes_no() {
+    prompt="$1"
+    default="$2"
+    if [ "$default" = "true" ]; then
+        label="Y/n"
+    else
+        label="y/N"
+    fi
+    while true; do
+        printf "%s [%s]: " "$prompt" "$label" >&2
+        IFS= read -r value
+        if [ -z "$value" ]; then
+            value="$default"
+        fi
+        case "$value" in
+            y|Y|yes|YES|true|TRUE) printf "true"; return 0 ;;
+            n|N|no|NO|false|FALSE) printf "false"; return 0 ;;
+            *) profile_log "Please enter y or n." ;;
+        esac
+    done
+}
+
+profile_prompt_select() {
+    prompt="$1"
+    default="$2"
+    shift 2
+    options="$*"
+    profile_log "$prompt" >&2
+    count=0
+    for opt in $options; do
+        count=$((count + 1))
+        printf "  %s) %s\n" "$count" "$opt" >&2
+    done
+    while true; do
+        if [ -n "$default" ]; then
+            printf "Select (1-%s) [default: %s]: " "$count" "$default" >&2
+        else
+            printf "Select (1-%s): " "$count" >&2
+        fi
+        IFS= read -r choice
+        if [ -z "$choice" ]; then
+            if [ -n "$default" ]; then
+                printf "%s" "$default"
+                return 0
+            fi
+            profile_log "Please enter a number." >&2
+            continue
+        fi
+        case "$choice" in
+            *[!0-9]*) profile_log "Please enter a number." >&2 ;;
+            *)
+                idx=1
+                for opt in $options; do
+                    if [ "$idx" -eq "$choice" ]; then
+                        printf "%s" "$opt"
+                        return 0
+                    fi
+                    idx=$((idx + 1))
+                done
+                profile_log "Invalid selection." >&2
+                ;;
+        esac
+    done
+}
+
+chroot_distro_suite_label() {
+    if [ -n "$1" ]; then
+        printf "%s" "$1"
+    else
+        printf "default"
+    fi
+}
+
+chroot_distro_suite_normalize() {
+    if [ "$1" = "default" ]; then
+        printf ""
+    else
+        printf "%s" "$1"
+    fi
+}
+
+chroot_distro_collect_rootfs_suites() {
+    distro="$1"
+    suites=""
+    for file in "$chroot_distro_path/.rootfs/"*.tar.xz; do
+        [ -f "$file" ] || continue
+        name=$(basename "$file" .tar.xz)
+        base_name=${name%%-*}
+        if [ "$base_name" != "$distro" ]; then
+            continue
+        fi
+        if [ "$base_name" != "$name" ]; then
+            suite_name=${name#${base_name}-}
+        else
+            suite_name="default"
+        fi
+        case " $suites " in
+            *" $suite_name "*) ;;
+            *) suites="$suites $suite_name" ;;
+        esac
+    done
+    printf "%s" "$suites"
+}
+
+chroot_distro_collect_instances_for_distro() {
+    distro="$1"
+    suite_filter="$2"
+    instances=""
+    for conf in "$chroot_distro_path/.config/"*.conf; do
+        [ -f "$conf" ] || continue
+        # shellcheck disable=SC1090
+        . "$conf"
+        if [ "${DISTRIB:-}" != "$distro" ]; then
+            continue
+        fi
+        suite_label=$(chroot_distro_suite_label "${SUITE:-}")
+        if [ -n "$suite_filter" ] && [ "$suite_filter" != "$suite_label" ]; then
+            continue
+        fi
+        instance=$(basename "$conf" .conf)
+        instances="$instances $instance"
+    done
+    printf "%s" "$instances"
+}
+
+chroot_distro_archive_has_path() {
+    archive_path="$1"
+    archive_item="$2"
+    tar -tf "$archive_path" 2>/dev/null | grep -Fx "$archive_item" >/dev/null 2>&1
+}
+
+profile_prompt_select_or_custom() {
+    prompt="$1"
+    default="$2"
+    shift 2
+    options="$*"
+    in_list="false"
+    for opt in $options; do
+        if [ "$opt" = "$default" ]; then
+            in_list="true"
+            break
+        fi
+    done
+    select_default="$default"
+    if [ "$in_list" != "true" ]; then
+        select_default="custom"
+    fi
+    choice=$(profile_prompt_select "$prompt" "$select_default" $options custom)
+    if [ "$choice" = "custom" ]; then
+        profile_prompt_default "Custom value" "$default"
+    else
+        printf "%s" "$choice"
+    fi
+}
+
+profile_is_uint() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+profile_is_port() {
+    port="$1"
+    if ! profile_is_uint "$port"; then
+        return 1
+    fi
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+profile_is_username() {
+    case "$1" in
+        ''|*[!a-z0-9_]* ) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+profile_is_no_space() {
+    case "$1" in
+        *[[:space:]]*) return 1 ;;
+        '') return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+profile_prompt_typed() {
+    label="$1"
+    default="$2"
+    type="$3"
+    while true; do
+        value=$(profile_prompt_default "$label" "$default")
+        case "$type" in
+            uint)
+                if profile_is_uint "$value"; then
+                    printf "%s" "$value"
+                    return 0
+                fi
+                profile_log "Please enter a valid number." >&2
+                ;;
+            port)
+                if profile_is_port "$value"; then
+                    printf "%s" "$value"
+                    return 0
+                fi
+                profile_log "Please enter a valid port (1-65535)." >&2
+                ;;
+            username)
+                if profile_is_username "$value"; then
+                    printf "%s" "$value"
+                    return 0
+                fi
+                profile_log "Use lowercase letters, numbers, and '_' only." >&2
+                ;;
+            nospace)
+                if profile_is_no_space "$value"; then
+                    printf "%s" "$value"
+                    return 0
+                fi
+                profile_log "Spaces are not allowed." >&2
+                ;;
+            *)
+                printf "%s" "$value"
+                return 0
+                ;;
+        esac
+    done
+}
+
+profile_sanitize_name() {
+    LC_ALL=C printf "%s" "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+chroot_distro_profile_resolve_conf() {
+    input="$1"
+    if [ -z "$input" ]; then
+        return 1
+    fi
+    if [ -f "$input" ]; then
+        printf "%s" "$input"
+        return 0
+    fi
+    if [ -f "$chroot_distro_path/.profile/${input}.conf" ]; then
+        printf "%s" "$chroot_distro_path/.profile/${input}.conf"
+        return 0
+    fi
+    return 1
+}
+
+chroot_distro_resolve_instance() {
+    input="$1"
+    INSTANCE_NAME="$input"
+    INSTANCE_CONF="$chroot_distro_path/.config/${input}.conf"
+    if [ -f "$INSTANCE_CONF" ]; then
+        # shellcheck disable=SC1090
+        . "$INSTANCE_CONF"
+        INSTANCE_DISTRO="${DISTRIB:-$input}"
+        INSTANCE_SUITE="${SUITE:-}"
+        if [ "${TARGET_TYPE:-file}" = "dir" ]; then
+            chroot_distro_image_file=""
+            chroot_distro_image_size=""
+        else
+            chroot_distro_image_file="${TARGET_PATH:-}"
+            chroot_distro_image_size="${DISK_SIZE:-}"
+        fi
+        return 0
+    fi
+    INSTANCE_CONF=""
+    INSTANCE_DISTRO="$input"
+    INSTANCE_SUITE=""
+    return 1
+}
+
+chroot_distro_rootfs_archive_name() {
+    distro="$1"
+    suite="$2"
+    if [ -n "$suite" ]; then
+        printf "%s-%s.tar.xz" "$distro" "$suite"
+    else
+        printf "%s.tar.xz" "$distro"
+    fi
+}
+
+chroot_distro_rootfs_archive_path() {
+    distro="$1"
+    suite="$2"
+    printf "%s/.rootfs/%s" "$chroot_distro_path" "$(chroot_distro_rootfs_archive_name "$distro" "$suite")"
+}
+
+chroot_distro_download_if_needed() {
+    distro="$1"
+    suite="$2"
+    archive_path=$(chroot_distro_rootfs_archive_path "$distro" "$suite")
+    if [ ! -f "$archive_path" ]; then
+        print_message info "Rootfs not found for '${distro}' ${suite:+($suite)}, starting download"
+        chroot_distro_download "$distro" "$suite"
+    else
+        print_message info "Rootfs already present for '${distro}' ${suite:+($suite)}, skipping download"
+    fi
+}
+
+chroot_distro_init_supported() {
+    distro="$1"
+    case "$distro" in
+        ubuntu) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+chroot_distro_init_run() {
+    distro="$1"
+    distro_path="$2"
+    conf_file="$3"
+    script_name="chroot_${distro}_init.sh"
+    host_script="$chroot_distro_path/scripts/$script_name"
+    module_script="/data/adb/modules/chroot-distro/scripts/$script_name"
+    chroot_init_dir="$distro_path/root/.chd-init"
+    chroot_script="$chroot_init_dir/$script_name"
+    chroot_conf="$chroot_init_dir/profile.conf"
+
+    if [ -f "$module_script" ]; then
+        mkdir -p "$chroot_distro_path/scripts"
+        if [ ! -f "$host_script" ] || ! cmp -s "$module_script" "$host_script"; then
+            cp "$module_script" "$host_script"
+            print_message info "Init script synced: $host_script"
+        fi
+    elif [ ! -f "$host_script" ]; then
+        print_message warning "Init script not found: $host_script"
+        return 1
+    fi
+    if [ ! -f "$conf_file" ]; then
+        print_message warning "Init config not found: $conf_file"
+        return 1
+    fi
+
+    mkdir -p "$chroot_init_dir"
+    cp "$host_script" "$chroot_script"
+    cp "$conf_file" "$chroot_conf"
+    chmod 700 "$chroot_script"
+
+    # Ensure chroot has a working resolver (create stub or file if needed)
+    chroot_distro_fix_env "$distro_path" || true
+
+    print_message info "Running init inside chroot: $script_name"
+    chroot "$distro_path" /bin/sh "/root/.chd-init/$script_name" --conf "/root/.chd-init/profile.conf"
+}
+
+chroot_distro_profile() {
+    PROFILE_DIR="$chroot_distro_path/.profile"
+    DEFAULT_CONF_CANDIDATES="${CHD_DEFAULT_CONF:-} $chroot_distro_path/default.conf $chroot_distro_path/.config/default.conf"
+
+    for candidate in $DEFAULT_CONF_CANDIDATES; do
+        [ -n "$candidate" ] || continue
+        if [ -f "$candidate" ]; then
+            # shellcheck disable=SC1090
+            . "$candidate"
+            profile_log "Loaded defaults from: $candidate"
+            break
+        fi
+    done
+
+    mkdir -p "$PROFILE_DIR"
+
+    profile_name="${1:-}"
+    if [ -z "$profile_name" ]; then
+        profiles=""
+        for file in "$PROFILE_DIR"/*.conf; do
+            [ -f "$file" ] || continue
+            name=$(basename "$file" .conf)
+            profiles="$profiles $name"
+        done
+        if [ -n "$profiles" ]; then
+            action=$(profile_prompt_select "Profile action" "" edit new)
+            if [ "$action" = "edit" ]; then
+                profile_name=$(profile_prompt_select "Select profile" "" $profiles)
+            else
+                profile_name=$(profile_prompt_default "Profile name" "my_profile")
+            fi
+        else
+            profile_name=$(profile_prompt_default "Profile name" "my_profile")
+        fi
+    fi
+    profile_name=$(profile_sanitize_name "$profile_name")
+    profile_path="$PROFILE_DIR/${profile_name}.conf"
+
+    if [ -f "$profile_path" ]; then
+        # shellcheck disable=SC1090
+        . "$profile_path"
+        profile_log "Loaded profile defaults: $profile_path"
+    fi
+
+    ARCH_DEFAULT="${ARCH:-$(uname -m | sed 's/aarch64/arm64/; s/armv.*/armhf/; s/x86_64/amd64/; s/i.86/i386/')}"
+    DISTRIB_DEFAULT="${DISTRIB:-ubuntu}"
+    SUITE_DEFAULT="${SUITE:-noble}"
+    DISK_SIZE_DEFAULT="${DISK_SIZE:-131072}"
+    FS_TYPE_DEFAULT="${FS_TYPE:-ext4}"
+    TARGET_TYPE_DEFAULT="${TARGET_TYPE:-file}"
+    DESKTOP_DEFAULT="${DESKTOP:-lxde}"
+    GRAPHICS_DEFAULT="${GRAPHICS:-vnc}"
+    USER_NAME_DEFAULT="${USER_NAME:-user}"
+    USER_PASSWORD_DEFAULT="${USER_PASSWORD:-changeme}"
+    SSH_PORT_DEFAULT="${SSH_PORT:-22}"
+    VNC_DISPLAY_DEFAULT="${VNC_DISPLAY:-0}"
+    VNC_WIDTH_DEFAULT="${VNC_WIDTH:-1920}"
+    VNC_HEIGHT_DEFAULT="${VNC_HEIGHT:-1080}"
+    VNC_DEPTH_DEFAULT="${VNC_DEPTH:-16}"
+    VNC_DPI_DEFAULT="${VNC_DPI:-75}"
+    X11_HOST_DEFAULT="${X11_HOST:-127.0.0.1}"
+    X11_DISPLAY_DEFAULT="${X11_DISPLAY:-0}"
+    X11_SDL_DEFAULT="${X11_SDL:-false}"
+    X11_SDL_DELAY_DEFAULT="${X11_SDL_DELAY:-15}"
+    LOCALE_DEFAULT="${LOCALE:-en_US.UTF-8}"
+    PULSE_HOST_DEFAULT="${PULSE_HOST:-127.0.0.1}"
+    PULSE_PORT_DEFAULT="${PULSE_PORT:-4712}"
+    SOURCE_PATH_DEFAULT="${SOURCE_PATH:-http://ports.ubuntu.com/}"
+    MOUNTS_DEFAULT="${MOUNTS:-/:/mnt/android}"
+    INIT_DEFAULT="${INIT:-run-parts}"
+    INIT_ASYNC_DEFAULT="${INIT_ASYNC:-true}"
+    INIT_LEVEL_DEFAULT="${INIT_LEVEL:-3}"
+    INIT_PATH_DEFAULT="${INIT_PATH:-/etc/rc.local}"
+    INIT_USER_DEFAULT="${INIT_USER:-root}"
+
+    external_storage="${EXTERNAL_STORAGE:-/sdcard}"
+    TARGET_PATH_DEFAULT="${TARGET_PATH:-${external_storage}/${profile_name}.img}"
+
+    profile_log "Creating profile: $profile_path"
+
+    DISTRO_OPTIONS="$supported_distros"
+    DESKTOP_OPTIONS="xfce lxde mate xterm"
+    GRAPHICS_OPTIONS="vnc x11"
+    ARCH_OPTIONS="arm64 armhf amd64 i386"
+    FS_TYPE_OPTIONS="ext4 f2fs xfs"
+    TARGET_TYPE_OPTIONS="file dir"
+
+    DISTRIB=$(profile_prompt_select "Distro" "" $DISTRO_OPTIONS)
+    case "$DISTRIB" in
+        ubuntu)
+            SUITE=$(profile_prompt_select "Ubuntu suite" "$SUITE_DEFAULT" trusty xenial bionic focal jammy noble oracular plucky)
+            ;;
+        debian)
+            SUITE=$(profile_prompt_select "Debian rootfs" "" debian debian_bullseye debian_bookworm debian_trixie)
+            ;;
+        kali)
+            SUITE=$(profile_prompt_select "Kali rootfs" "$SUITE_DEFAULT" full minimal nano)
+            ;;
+        fedora)
+            SUITE=$(profile_prompt_select "Fedora rootfs" "$SUITE_DEFAULT" v4.24.0 v4.23.0 v4.17.3 v4.15.0)
+            ;;
+        chimera)
+            SUITE=$(profile_prompt_select "Chimera rootfs" "$SUITE_DEFAULT" full bootstrap)
+            ;;
+        adelie)
+            SUITE=$(profile_prompt_select "Adelie rootfs" "$SUITE_DEFAULT" full mini)
+            ;;
+        arch|artix|alpine|void)
+            SUITE=""
+            ;;
+        *)
+            SUITE=$(profile_prompt_default "Suite" "$SUITE_DEFAULT")
+            ;;
+    esac
+
+    TARGET_PATH=$(profile_prompt_typed "Image path" "$TARGET_PATH_DEFAULT" nospace)
+    DISK_SIZE=$(profile_prompt_typed "Image size (MB)" "$DISK_SIZE_DEFAULT" uint)
+    USER_NAME=$(profile_prompt_typed "User name" "$USER_NAME_DEFAULT" username)
+    USER_PASSWORD="$USER_PASSWORD_DEFAULT"
+    profile_log "User password is set to default: $USER_PASSWORD_DEFAULT"
+    profile_log "Please change it after install."
+
+    GUI_ENABLE=$(profile_prompt_yes_no "Enable GUI" "true")
+    if [ "$GUI_ENABLE" = "true" ]; then
+        DESKTOP=$(profile_prompt_select_or_custom "Desktop" "$DESKTOP_DEFAULT" $DESKTOP_OPTIONS)
+        GRAPHICS=$(profile_prompt_select_or_custom "Graphics" "$GRAPHICS_DEFAULT" $GRAPHICS_OPTIONS)
+    else
+        DESKTOP="none"
+        GRAPHICS="none"
+    fi
+
+    SSH_ENABLE=$(profile_prompt_yes_no "Enable SSH" "true")
+    if [ "$SSH_ENABLE" = "true" ]; then
+        SSH_PORT=$(profile_prompt_typed "SSH port" "$SSH_PORT_DEFAULT" port)
+        SSH_ARGS="${SSH_ARGS:-}"
+    else
+        SSH_PORT="$SSH_PORT_DEFAULT"
+        SSH_ARGS="${SSH_ARGS:-}"
+    fi
+
+    if [ "$GRAPHICS" = "vnc" ]; then
+        VNC_ENABLE="true"
+        VNC_DISPLAY=$(profile_prompt_typed "VNC display" "$VNC_DISPLAY_DEFAULT" uint)
+        VNC_WIDTH=$(profile_prompt_typed "VNC width" "$VNC_WIDTH_DEFAULT" uint)
+        VNC_HEIGHT=$(profile_prompt_typed "VNC height" "$VNC_HEIGHT_DEFAULT" uint)
+        VNC_DEPTH=$(profile_prompt_typed "VNC depth" "$VNC_DEPTH_DEFAULT" uint)
+        VNC_DPI=$(profile_prompt_typed "VNC DPI" "$VNC_DPI_DEFAULT" uint)
+        VNC_ARGS="${VNC_ARGS:-}"
+    else
+        VNC_ENABLE="false"
+        VNC_DISPLAY="$VNC_DISPLAY_DEFAULT"
+        VNC_WIDTH="$VNC_WIDTH_DEFAULT"
+        VNC_HEIGHT="$VNC_HEIGHT_DEFAULT"
+        VNC_DEPTH="$VNC_DEPTH_DEFAULT"
+        VNC_DPI="$VNC_DPI_DEFAULT"
+        VNC_ARGS="${VNC_ARGS:-}"
+    fi
+
+    if [ "$GRAPHICS" = "x11" ]; then
+        X11_HOST=$(profile_prompt_default "X11 host" "$X11_HOST_DEFAULT")
+        X11_DISPLAY=$(profile_prompt_typed "X11 display" "$X11_DISPLAY_DEFAULT" uint)
+        X11_SDL=$(profile_prompt_yes_no "Enable X11 SDL" "$X11_SDL_DEFAULT")
+        X11_SDL_DELAY=$(profile_prompt_typed "X11 SDL delay" "$X11_SDL_DELAY_DEFAULT" uint)
+    else
+        X11_HOST="$X11_HOST_DEFAULT"
+        X11_DISPLAY="$X11_DISPLAY_DEFAULT"
+        X11_SDL="$X11_SDL_DEFAULT"
+        X11_SDL_DELAY="$X11_SDL_DELAY_DEFAULT"
+    fi
+
+    PULSE_ENABLE=$(profile_prompt_yes_no "Enable PulseAudio" "true")
+    if [ "$PULSE_ENABLE" = "true" ]; then
+        PULSE_HOST=$(profile_prompt_default "Pulse host" "$PULSE_HOST_DEFAULT")
+        PULSE_PORT=$(profile_prompt_typed "Pulse port" "$PULSE_PORT_DEFAULT" port)
+    else
+        PULSE_HOST="$PULSE_HOST_DEFAULT"
+        PULSE_PORT="$PULSE_PORT_DEFAULT"
+    fi
+
+    ADVANCED_ENABLE=$(profile_prompt_yes_no "Configure advanced options" "false")
+    if [ "$ADVANCED_ENABLE" = "true" ]; then
+        ARCH=$(profile_prompt_select_or_custom "Arch" "$ARCH_DEFAULT" $ARCH_OPTIONS)
+        FS_TYPE=$(profile_prompt_select_or_custom "Filesystem" "$FS_TYPE_DEFAULT" $FS_TYPE_OPTIONS)
+        TARGET_TYPE=$(profile_prompt_select_or_custom "Target type" "$TARGET_TYPE_DEFAULT" $TARGET_TYPE_OPTIONS)
+        LOCALE=$(profile_prompt_default "Locale" "$LOCALE_DEFAULT")
+        SOURCE_PATH=$(profile_prompt_default "Ubuntu mirror" "$SOURCE_PATH_DEFAULT")
+        MOUNTS=$(profile_prompt_default "Mounts" "$MOUNTS_DEFAULT")
+        INIT_DEFAULT=$(profile_prompt_default "Init" "$INIT_DEFAULT")
+        INIT_ASYNC_DEFAULT=$(profile_prompt_default "Init async" "$INIT_ASYNC_DEFAULT")
+        INIT_LEVEL_DEFAULT=$(profile_prompt_default "Init level" "$INIT_LEVEL_DEFAULT")
+        INIT_PATH_DEFAULT=$(profile_prompt_default "Init path" "$INIT_PATH_DEFAULT")
+        INIT_USER_DEFAULT=$(profile_prompt_default "Init user" "$INIT_USER_DEFAULT")
+    else
+        ARCH="$ARCH_DEFAULT"
+        FS_TYPE="$FS_TYPE_DEFAULT"
+        TARGET_TYPE="$TARGET_TYPE_DEFAULT"
+        LOCALE="$LOCALE_DEFAULT"
+        SOURCE_PATH="$SOURCE_PATH_DEFAULT"
+        MOUNTS="$MOUNTS_DEFAULT"
+    fi
+
+    INCLUDE="bootstrap desktop graphics init"
+    [ "$SSH_ENABLE" = "true" ] && INCLUDE="$INCLUDE extra/ssh"
+    [ "$PULSE_ENABLE" = "true" ] && INCLUDE="$INCLUDE extra/pulse"
+    [ "$GRAPHICS" = "vnc" ] && INCLUDE="$INCLUDE graphics/vnc"
+    [ "$GRAPHICS" = "x11" ] && INCLUDE="$INCLUDE graphics/x11"
+
+    cat > "$profile_path" <<EOF
+ARCH="$ARCH"
+DESKTOP="$DESKTOP"
+DISK_SIZE="$DISK_SIZE"
+DISTRIB="$DISTRIB"
+DNS=""
+FS_TYPE="$FS_TYPE"
+GRAPHICS="$GRAPHICS"
+INCLUDE="$INCLUDE"
+INIT="$INIT_DEFAULT"
+INIT_ASYNC="$INIT_ASYNC_DEFAULT"
+INIT_LEVEL="$INIT_LEVEL_DEFAULT"
+INIT_PATH="$INIT_PATH_DEFAULT"
+INIT_USER="$INIT_USER_DEFAULT"
+LOCALE="$LOCALE"
+MOUNTS="$MOUNTS"
+NET_TRIGGER=""
+POWER_TRIGGER=""
+PULSE_HOST="$PULSE_HOST"
+PULSE_PORT="$PULSE_PORT"
+SOURCE_PATH="$SOURCE_PATH"
+SSH_ARGS="$SSH_ARGS"
+SSH_PORT="$SSH_PORT"
+SUITE="$SUITE"
+TARGET_PATH="$TARGET_PATH"
+TARGET_TYPE="$TARGET_TYPE"
+USER_NAME="$USER_NAME"
+USER_PASSWORD="$USER_PASSWORD"
+VNC_ARGS="$VNC_ARGS"
+VNC_DEPTH="$VNC_DEPTH"
+VNC_DISPLAY="$VNC_DISPLAY"
+VNC_DPI="$VNC_DPI"
+VNC_HEIGHT="$VNC_HEIGHT"
+VNC_WIDTH="$VNC_WIDTH"
+X11_DISPLAY="$X11_DISPLAY"
+X11_HOST="$X11_HOST"
+X11_SDL="$X11_SDL"
+X11_SDL_DELAY="$X11_SDL_DELAY"
+EOF
+
+    profile_log "Profile saved: $profile_path"
+}
+
 chroot_distro_help() {
     print_message info "$script: Install and manage GNU/Linux distributions in a chroot environment on Android.
 
@@ -636,41 +1289,44 @@ General:
   env                         - Display environment debug information
 
 Distribution Management:
-  list [-i|--installed]       - List available distributions
+    list [-i|--installed]       - List available distributions
                                 -i, --installed   Show only installed distributions
-  download <distro> [link]    - Download rootfs for a distribution
-                                [link]            Optional custom download link
-  redownload <distro> [link]  - Re-download rootfs for a distribution
-  delete <distro>             - Delete rootfs for a distribution
-  add <distro>                - Add a new custom distribution
-  rename <old_name> <new_name>- Rename an existing distribution
-  remove <distro>             - Completely remove a distribution (rootfs, backup, and directory)
+    download <distro> [suite|url] - Download rootfs for a distribution
+                                [suite|url]       Optional suite name or custom URL
+                                --force           Overwrite existing rootfs
+
+    delete <distro>             - Delete rootfs for a distribution (suite-aware)
+    add <distro>                - Add a new custom distribution
+    rename <old_name> <new_name>- Rename an instance
+    remove <distro>             - Remove all instances and rootfs for a suite (suite-aware)
 
 Installation:
-  install <distro>            - Install a distribution
-  reinstall <distro> [-f|--force] - Reinstall a distribution
+    install [--no-init] [--no-img] <profile> - Install using a profile (.profile/<name>.conf)
+    uninstall <instance> [-f|--force] [--include-profile] - Uninstall an instance
                                 -f, --force       Force close open files and unmount
-  uninstall <distro> [-f|--force] - Uninstall a distribution
-                                -f, --force       Force close open files and unmount
+                                --include-profile Remove instance config from .config
 
 Mount Management:
-  mount <distro>              - Mount a distribution's rootfs without entering
-  unmount <distro|all> [-f|--force] [-a|--all] - Unmount mount points
+    mount <instance>            - Mount an instance's rootfs without entering
+    unmount <instance|all> [-f|--force] [-a|--all] - Unmount mount points
                                 -f, --force       Force close files and unmount
                                 -a, --all         Unmount all points, including non-system ones
 
 Backup Management:
-  backup <distro> [<path>]    - Create a backup of a distribution
+    backup <instance> [<path>]  - Create a backup of an instance
                                 <path>            Custom path for backup location
-  unbackup <distro>           - Delete a backup from the default location
-  restore <distro> [-d|--default] [--force] [<path>] - Restore a distribution
+    unbackup <instance>         - Delete a backup from the default location
+    restore <instance> [-d|--default] [--force] [<path>] - Restore an instance
                                 <path>            Custom path for backup location
                                 -d, --default     Restore default settings
                                 --force           Force restore despite potential issues
 
 Execution:
-  command <distro> <command>  - Run a command inside a distribution
-  login <distro>              - Log in to a distribution
+    command <instance> <command> - Run a command inside an instance
+    login <instance>             - Log in to an instance
+
+Profiles:
+    profile [name]              - Create a profile config (saved under .profile)
 
 Settings:
   fix-suid <enable|disable>   - Force suid option on /data mount (default: enable)
@@ -698,6 +1354,9 @@ Warning:
 
 License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
+
+Version:
+    3.0.11 (Stable confirmed : ubuntu noble)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -735,108 +1394,75 @@ centos_stream_rootfs_base_url=$anlinux_rootfs_base_url/raw/master/Rootfs/CentOS_
 
 chroot_distro_list() {
   installed_distros="$1"
-  if [ "yes" = "$installed_distros" ]; then
-     for distro in $supported_distros; do
-             if [ -d "${chroot_distro_path}/${distro}" ]; then
-                    print_message info "${distro}" 
-             fi
-      done
-      return 
-  fi
-  GREEN=$(printf '\033[32m')
-  RESET=$(printf '\033[0m')
+    sanitize_var() {
+            printf "%s" "$1" | tr -c 'A-Za-z0-9_' '_'
+    }
 
-  for file in "$chroot_distro_path/.rootfs/"*.tar.xz; do
-    if [ -f "$file" ]; then
-      name=$(basename "$file" .tar.xz)
-      eval "rootfs_map_${name}=1"
-    fi
-  done
-
-  for file in "$chroot_distro_path/.backup/"*.tar.xz; do
-    if [ -f "$file" ]; then
-      name=$(basename "$file" .tar.xz)
-      eval "backup_map_${name}=1"
-    fi
-  done
-
-  for dir in "$chroot_distro_path/"*/; do
-    if [ -d "$dir" ]; then
-      name=$(basename "$dir")
-      eval "installed_map_${name}=1"
-    fi
-  done
-
-  max=0
-  for d in $supported_distros; do
-    len=$(printf "%s" "$d" | wc -c)
-    if [ "$len" -gt "$max" ]; then
-      max=$len
-    fi
-  done
-
-  h1=Distro; h2=Downloaded; h3=Installed; h4=Backup
-  h1_len=$(printf "%s" "$h1" | wc -c)
-  if [ "$h1_len" -gt "$max" ]; then
-    w1=$h1_len
-  else
-    w1=$max
-  fi
-  w2=$(printf "%s" "$h2" | wc -c)
-  w3=$(printf "%s" "$h3" | wc -c)
-  w4=$(printf "%s" "$h4" | wc -c)
-  c1=$((w1+2))
-  c2=$((w2+2))
-  c3=$((w3+2))
-  c4=$((w4+2))
-
-  rep() {
-    n="$2"
-    while [ "$n" -gt 0 ]; do
-      printf "%s" "$1"
-      n=$((n-1))
+    for file in "$chroot_distro_path/.rootfs/"*.tar.xz; do
+            [ -f "$file" ] || continue
+            name=$(basename "$file" .tar.xz)
+            base_name=${name%%-*}
+            if [ "$base_name" != "$name" ]; then
+                    suite_name=${name#${base_name}-}
+            else
+                    suite_name="default"
+            fi
+            safe_base=$(sanitize_var "$base_name")
+            eval "download_map_${safe_base}=\"\${download_map_${safe_base}-} ${suite_name}\""
     done
-  }
 
-  top="┌$(rep '─' "$c1")┬$(rep '─' "$c2")┬$(rep '─' "$c3")┬$(rep '─' "$c4")┐"
-  sep="├$(rep '─' "$c1")┼$(rep '─' "$c2")┼$(rep '─' "$c3")┼$(rep '─' "$c4")┤"
-  bot="└$(rep '─' "$c1")┴$(rep '─' "$c2")┴$(rep '─' "$c3")┴$(rep '─' "$c4")┘"
+    for conf in "$chroot_distro_path/.config/"*.conf; do
+            [ -f "$conf" ] || continue
+            instance=$(basename "$conf" .conf)
+            distro=$( ( . "$conf"; printf "%s" "${DISTRIB:-}" ) )
+            [ -n "$distro" ] || continue
+            safe_base=$(sanitize_var "$distro")
+            eval "installed_map_${safe_base}=\"\${installed_map_${safe_base}-} ${instance}\""
+    done
 
-  printf "%b\n│ %-${w1}s │ %-${w2}s │ %-${w3}s │ %-${w4}s │\n%b\n" \
-    "$top" "$h1" "$h2" "$h3" "$h4" "$sep"
+    for file in "$chroot_distro_path/.backup/"*.tar.xz; do
+            [ -f "$file" ] || continue
+            instance=$(basename "$file" .tar.xz)
+            conf="$chroot_distro_path/.config/${instance}.conf"
+            if [ -f "$conf" ]; then
+                    distro=$( ( . "$conf"; printf "%s" "${DISTRIB:-}" ) )
+            else
+                    distro=""
+            fi
+            [ -n "$distro" ] || continue
+            safe_base=$(sanitize_var "$distro")
+            eval "backup_map_${safe_base}=\"\${backup_map_${safe_base}-} ${instance}\""
+    done
 
-  for d in $supported_distros; do
-    dl=No
-    eval "test -n \"\$rootfs_map_$d\"" && dl=Yes
-
-    ins=No
-    eval "test -n \"\$installed_map_$d\"" && ins=Yes
-
-    bk=No
-    eval "test -n \"\$backup_map_$d\"" && bk=Yes
-
-    printf "│ %-${w1}s │ " "$d"
-
-    if [ "$dl" = Yes ]; then
-      printf "%b%-${w2}s%b │ " "$GREEN" "$dl" "$RESET"
-    else
-      printf "%-${w2}s │ " "$dl"
-    fi
-
-    if [ "$ins" = Yes ]; then
-      printf "%b%-${w3}s%b │ " "$GREEN" "$ins" "$RESET"
-    else
-      printf "%-${w3}s │ " "$ins"
-    fi
-
-    if [ "$bk" = Yes ]; then
-      printf "%b%-${w4}s%b │\n" "$GREEN" "$bk" "$RESET"
-    else
-      printf "%-${w4}s │\n" "$bk"
-    fi
-  done
-
-  printf "%b\n" "$bot"
+    print_message info "Distro"
+    for d in $supported_distros; do
+            safe=$(sanitize_var "$d")
+            downloads=$(eval "printf \"%s\" \"\${download_map_${safe}-}\"")
+            installed=$(eval "printf \"%s\" \"\${installed_map_${safe}-}\"")
+            backups=$(eval "printf \"%s\" \"\${backup_map_${safe}-}\"")
+            if [ "yes" = "$installed_distros" ] && [ -z "$installed" ]; then
+                    continue
+            fi
+            print_message info "├── $d"
+            if [ -n "$downloads" ]; then
+                    print_message info "│   ├── Downloaded"
+                    for suite in $downloads; do
+                            print_message info "│   │   ├── $suite"
+                    done
+            fi
+            if [ -n "$installed" ]; then
+                    print_message info "│   ├── Installed"
+                    for instance in $installed; do
+                            print_message info "│   │   ├── $instance"
+                    done
+            fi
+            if [ -n "$backups" ]; then
+                    print_message info "│   ├── Backup"
+                    for instance in $backups; do
+                            print_message info "│   │   ├── $instance"
+                    done
+            fi
+    done
 }
 
 chroot_distro_check_if_supported() {
@@ -851,40 +1477,54 @@ chroot_distro_check_if_supported() {
 
 chroot_distro_download() {
     distro="$1"
-    chroot_distro_mount_rootfs_image
+    download_url_override="${2:-}"
+    download_suite="${3:-}"
+    force_overwrite="${4:-}"
+    # Do not auto-mount the top-level path; downloads write into $chroot_distro_path/.rootfs
     chroot_distro_check_if_supported "$distro"
     
-    if [ -n "$2" ]; then
-        download_url="$2"
-    else
+    if [ -n "$download_url_override" ] && [ -n "$download_suite" ]; then
+        download_url="$download_url_override"
+    elif [ -n "$download_url_override" ] && [ -z "$download_suite" ]; then
+        case "$download_url_override" in
+            *://*) download_url="$download_url_override" ;;
+            *) download_suite="$download_url_override" ;;
+        esac
+    fi
+
+    if [ -z "$download_url" ]; then
         if [ "$distro" = "ubuntu" ]; then
             distro_name='Ubuntu'
-            print_message info "[1] ubuntu trusty 14.04
+            if [ -n "$download_suite" ]; then
+                release="$download_suite"
+            else
+                print_message info "[1] ubuntu trusty 14.04
 [2] ubuntu xenial 16.04
 [3] ubuntu bionic 18.04"
-            if [ "${architecture}" != "i386" ]; then
-                print_message info "[4] ubuntu focal 20.04
+                if [ "${architecture}" != "i386" ]; then
+                    print_message info "[4] ubuntu focal 20.04
 [5] ubuntu jammy 22.04
 [6] ubuntu noble 24.04
 [7] ubuntu oracular 24.10
 [8] ubuntu plucky 25.04"
+                fi
+                while true; do
+                    print_message info "Enter a number (1-8, or 'q' to quit): "
+                    read -r number
+                    case "$number" in
+                        1) release="trusty"; break ;;
+                        2) release="xenial"; break ;;
+                        3) release="bionic"; break ;;
+                        4) release="focal"; break ;;
+                        5) release="jammy"; break ;;
+                        6) release="noble"; break ;;
+                        7) release="oracular"; break ;;
+                        8) release="plucky"; break ;;
+                        q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
+                        *) print_message warning "Invalid option: $number. Please try again." ;;
+                    esac
+                done
             fi
-            while true; do
-                print_message info "Enter a number (1-8, or 'q' to quit): "
-                read -r number
-                case "$number" in
-                    1) release="trusty"; break ;;
-                    2) release="xenial"; break ;;
-                    3) release="bionic"; break ;;
-                    4) release="focal"; break ;;
-                    5) release="jammy"; break ;;
-                    6) release="noble"; break ;;
-                    7) release="oracular"; break ;;
-                    8) release="plucky"; break ;;
-                    q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
-                    *) print_message warning "Invalid option: $number. Please try again." ;;
-                esac
-            done
             version="$(wget -qO- "${ubuntu_rootfs_base_url}/${release}/release/" | grep -oE "ubuntu-base-[0-9]+(\.[0-9]+)*-base-${architecture}\.tar\.gz" | head -n 1 | sed -E 's/ubuntu-base-([0-9]+(\.[0-9]+)*)-base-.*/\1/')"
             download_url="${ubuntu_rootfs_base_url}/${release}/release/ubuntu-base-${version}-base-${architecture}.tar.gz"
         elif [ "$distro" = "alpine" ]; then
@@ -893,39 +1533,47 @@ chroot_distro_download() {
             download_url="${alpine_rootfs_base_url}/${hwm_alpine}/$(wget -qO- "${alpine_rootfs_base_url}/${hwm_alpine}/" | grep -oE "alpine-minirootfs-[0-9]+\.[0-9]+\.[0-9]+-${hwm_alpine}\.tar\.gz" | sed "s/.*-\([0-9]\+\.[0-9]\+\.[0-9]\+\)-.*/\1 &/" | sort -t. -k1,1nr -k2,2nr -k3,3nr | head -n1 | cut -d' ' -f2-)"
         elif [ "$distro" = "kali" ]; then
             distro_name='Kali Linux'
-            print_message info "[1] kali linux full
+            if [ -n "$download_suite" ]; then
+                rootfs="$download_suite"
+            else
+                print_message info "[1] kali linux full
 [2] kali linux minimal
 [3] kali linux nano"
-            while true; do
-                print_message info "Enter a number (1-3, or 'q' to quit): "
-                read -r number
-                case "$number" in
-                    1) rootfs="full"; break ;;
-                    2) rootfs="minimal"; break ;;
-                    3) rootfs="nano"; break ;;
-                    q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
-                    *) print_message warning "Invalid option: $number. Please try again." ;;
-                esac
-            done
+                while true; do
+                    print_message info "Enter a number (1-3, or 'q' to quit): "
+                    read -r number
+                    case "$number" in
+                        1) rootfs="full"; break ;;
+                        2) rootfs="minimal"; break ;;
+                        3) rootfs="nano"; break ;;
+                        q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
+                        *) print_message warning "Invalid option: $number. Please try again." ;;
+                    esac
+                done
+            fi
             download_url="${kali_rootfs_base_url}/current/rootfs/kali-nethunter-rootfs-${rootfs}-${architecture}.tar.xz"
         elif [ "$distro" = "debian" ]; then
             distro_name='Debian'
-            print_message info "[1] Debian (AnLinux)
+            if [ -n "$download_suite" ]; then
+                rootfs="$download_suite"
+            else
+                print_message info "[1] Debian (AnLinux)
 [2] Debian bullseye (proot-distro)
 [3] Debian bookworm (proot-distro)
 [4] Debian trixie (proot-distro)" 
-            while true; do
-                printf "Enter a number (1-3, or 'q' to quit): "
-                read -r number
-                case "$number" in
-                    1) rootfs="debian"; break ;;
-                    2) rootfs="debian_bullseye"; break ;;
-                    3) rootfs="debian_bookworm"; break ;;
-                    4) rootfs="debian_trixie"; break ;;
-                    q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
-                    *) print_message warning "Invalid option: $number. Please try again." ;;
-                esac
-            done
+                while true; do
+                    printf "Enter a number (1-3, or 'q' to quit): "
+                    read -r number
+                    case "$number" in
+                        1) rootfs="debian"; break ;;
+                        2) rootfs="debian_bullseye"; break ;;
+                        3) rootfs="debian_bookworm"; break ;;
+                        4) rootfs="debian_trixie"; break ;;
+                        q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
+                        *) print_message warning "Invalid option: $number. Please try again." ;;
+                    esac
+                done
+            fi
             case "$rootfs" in
                 debian) download_url="$debian_rootfs_base_url_anlinux/${architecture}/debian-rootfs-${architecture}.tar.xz" ;;
                 debian_bullseye) download_url="${debian_rootfs_base_url_prootdistro}/v4.7.0/debian-bullseye-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/ | sed s/i386/i686/ | sed s/armhf/arm/)-pd-v4.7.0.tar.xz" ;;
@@ -949,22 +1597,26 @@ chroot_distro_download() {
             download_url="${deepin_rootfs_base_url}/deepin-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/)-pd-v4.16.0.tar.xz"
         elif [ "$distro" = "fedora" ]; then
             distro_name='Fedora'
-            print_message info "[1] fedora 4.24.0
+            if [ -n "$download_suite" ]; then
+                release_version="$download_suite"
+            else
+                print_message info "[1] fedora 4.24.0
 [2] fedora 4.23.0
 [3] fedora 4.17.3
 [4] fedora 4.15.0"
-            while true; do
-                print_message info "Enter a number (1-4, or 'q' to quit): "
-                read -r number
-                case "$number" in
-                    1) release_version="v4.24.0"; break ;;
-                    2) release_version="v4.23.0"; break ;;
-                    3) release_version="v4.17.3"; break ;;
-                    4) release_version="v4.15.0"; break ;;
-                    q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
-                    *) print_message warning "Invalid option: $number. Please try again." ;;
-                esac
-            done
+                while true; do
+                    print_message info "Enter a number (1-4, or 'q' to quit): "
+                    read -r number
+                    case "$number" in
+                        1) release_version="v4.24.0"; break ;;
+                        2) release_version="v4.23.0"; break ;;
+                        3) release_version="v4.17.3"; break ;;
+                        4) release_version="v4.15.0"; break ;;
+                        q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
+                        *) print_message warning "Invalid option: $number. Please try again." ;;
+                    esac
+                done
+            fi
             download_url="${proot_distro_rootfs_base_url}/${release_version}/fedora-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/)-pd-${release_version}.tar.xz"
         elif [ "$distro" = "openkylin" ]; then
             distro_name='OpenKylin'
@@ -974,34 +1626,42 @@ chroot_distro_download() {
             download_url="${rocky_rootfs_base_url}/rocky-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/)-pd-v4.20.0.tar.xz"
         elif [ "$distro" = "chimera" ]; then
             distro_name='Chimera Linux'
-            print_message info "[1] chimera full
+            if [ -n "$download_suite" ]; then
+                rootfs="$download_suite"
+            else
+                print_message info "[1] chimera full
 [2] chimera minimal"
-            while true; do
-                printf "Enter a number (1-2, or 'q' to quit): "
-                read -r number
-                case "$number" in
-                    1) rootfs="full"; break ;;
-                    2) rootfs="bootstrap"; break ;;
-                    q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
-                    *) print_message warning "Invalid option: $number. Please try again." ;;
-                esac
-            done
+                while true; do
+                    printf "Enter a number (1-2, or 'q' to quit): "
+                    read -r number
+                    case "$number" in
+                        1) rootfs="full"; break ;;
+                        2) rootfs="bootstrap"; break ;;
+                        q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
+                        *) print_message warning "Invalid option: $number. Please try again." ;;
+                    esac
+                done
+            fi
             version="$(wget -qO- "${chimera_rootfs_base_url}" | grep -oE "chimera-linux-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/)-ROOTFS-[0-9]{8}-${rootfs}\.tar.gz" | sed -E "s/.*ROOTFS-([0-9]{8})-${rootfs}\.tar\.gz/\1/" | head -n 1)"
             download_url="${chimera_rootfs_base_url}/${version}"
         elif [ "$distro" = "adelie" ]; then
             distro_name='Adélie Linux'
-            print_message info "[1] adelie linux full
+            if [ -n "$download_suite" ]; then
+                rootfs="$download_suite"
+            else
+                print_message info "[1] adelie linux full
 [2] adelie linux minimal"
-            while true; do
-                printf "Enter a number (1-2, or 'q' to quit): "
-                read -r number
-                case "$number" in
-                    1) rootfs="full"; break ;;
-                    2) rootfs="mini"; break ;;
-                    q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
-                    *) print_message warning "Invalid option: $number. Please try again." ;;
-                esac
-            done
+                while true; do
+                    printf "Enter a number (1-2, or 'q' to quit): "
+                    read -r number
+                    case "$number" in
+                        1) rootfs="full"; break ;;
+                        2) rootfs="mini"; break ;;
+                        q) print_message error "Operation cancelled"; chroot_distro_exit 1 ;;
+                        *) print_message warning "Invalid option: $number. Please try again." ;;
+                    esac
+                done
+            fi
             version="$(wget -qO- "$adelie_rootfs_base_url" | grep -oE "adelie-rootfs-${rootfs}-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/ | sed s/armhf/armv7/)-[^\" ]+-[0-9]{8}\.txz" | sed -E 's/.*-([0-9]{8})\.txz/\1/' | head -n 1)"
             download_url="${adelie_rootfs_base_url}/adelie-rootfs-${rootfs}-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/ | sed s/armhf/armv7/)-1.0-beta6-${version}.txz"
         elif [ "$distro" = "manjaro" ]; then
@@ -1046,19 +1706,29 @@ chroot_distro_download() {
         chroot_distro_exit 87
     fi
     
-    if [ -f "$chroot_distro_path/.rootfs/$distro.tar.xz" ]; then
-        print_message error "The rootfs for '${distro}' is already downloaded."
-        print_message note "Use '${script} install ${distro}' to proceed with installation or '${script} delete ${distro}' to remove the existing file."
-        chroot_distro_exit 89
+    archive_path="$(chroot_distro_rootfs_archive_path "$distro" "$download_suite")"
+    if [ -f "$archive_path" ]; then
+        if [ "$force_overwrite" = "yes" ]; then
+            rm "$archive_path"
+        else
+            overwrite=$(profile_prompt_yes_no "Rootfs already exists. Overwrite" "false")
+            if [ "$overwrite" = "true" ]; then
+                rm "$archive_path"
+            else
+                print_message note "Download cancelled."
+                chroot_distro_exit 0
+            fi
+        fi
     fi
     
-    if ! wget -O "$chroot_distro_path/.rootfs/$distro.tar.xz" "$download_url"; then
+    if ! wget -O "$archive_path" "$download_url"; then
         print_message error "Failed to download the $distro_name Rootfs."
-        if [ -e "$chroot_distro_path/.rootfs/$distro.tar.xz" ]; then
-            rm "$chroot_distro_path/.rootfs/$distro.tar.xz"
+        if [ -e "$archive_path" ]; then
+            rm "$archive_path"
         fi
         chroot_distro_exit 88
     fi
+    print_message info "Rootfs downloaded: $archive_path"
 }
 
 chroot_distro_find_processes_with_open_files() {
@@ -1073,22 +1743,51 @@ chroot_distro_find_processes_with_open_files() {
 
 chroot_distro_find_all_mount_points() {
     path="$1"
-    cat /proc/mounts | grep -F "$path" | awk '{print $2}'
+    # normalize path (remove trailing slash) to match entries in /proc/mounts
+    path="${path%/}"
+    # print mount targets that are the path itself or descendents of the path
+    awk -v p="$path" '($2==p) || (substr($2,1,length(p)+1)==p"/") {print $2}' /proc/mounts || true
 }
 
 chroot_distro_find_all_loopback_mount_points() {
     path="$1"
-    losetup -a | grep -F "$path" | grep -Eo '^[^:]+'
+    path="${path%/}"
+    # Prefer losetup listing if available (handles loop devices with backing files)
+    if command -v losetup >/dev/null 2>&1; then
+        losetup -a | grep -F "$path" | grep -Eo '^[^:]+' || true
+    elif [ -n "$busyboxpath" ] && [ -x "$busyboxpath" ]; then
+        "$busyboxpath" losetup -a | grep -F "$path" | grep -Eo '^[^:]+' || true
+    else
+        # Fallback: parse /proc/mounts for devices under the path that look like loop devices
+        awk -v p="$path" '($2==p) || (substr($2,1,length(p)+1)==p"/") { if ($1 ~ /^\/dev\/(loop|block\/loop)[0-9]+/) print $1 }' /proc/mounts || true
+    fi
 }
 
 chroot_distro_delete() {
-    chroot_distro_check_if_supported "$1"
+    distro="$1"
+    chroot_distro_check_if_supported "$distro"
 
-    archive_path="$chroot_distro_path/.rootfs/$1.tar.xz"
+    suites=$(chroot_distro_collect_rootfs_suites "$distro")
+    if [ -z "$suites" ]; then
+        print_message error "The rootfs for '${distro}' has not been downloaded."
+        print_message note "Use '${script} download ${distro}' to download it."
+        chroot_distro_exit 1
+    fi
+
+    set -- $suites
+    if [ $# -gt 1 ]; then
+        suite_selected=$(profile_prompt_select "Select suite to delete" "" $suites)
+    else
+        suite_selected="$1"
+    fi
+
+    suite_normalized=$(chroot_distro_suite_normalize "$suite_selected")
+    archive_path=$(chroot_distro_rootfs_archive_path "$distro" "$suite_normalized")
     if [ -f "$archive_path" ]; then
         rm "$archive_path"
+        print_message info "Rootfs deleted for '${distro}' (${suite_selected})"
     else
-        print_message error "The rootfs for '${distro}' has not been downloaded."
+        print_message error "The rootfs for '${distro}' (${suite_selected}) has not been downloaded."
         print_message note "Use '${script} download ${distro}' to download it."
         chroot_distro_exit 1
     fi
@@ -1188,33 +1887,67 @@ mount_android_dirs() {
 }
 
 chroot_distro_force_unmount() {
-     mount_point="$1"
-     # first try to kill all processes before trying to unmount anything
-     # note: close from earlier to later processes to ensure that no new worker processes are created during killing
-     chroot_distro_find_processes_with_open_files "$mount_point" | xargs -I {} kill -9 {} > /dev/null 2>&1
-     # before normal unmounts, go through all loopback devices
-     # note: in reverse order in case there is loopback mount from inside the loopback mount (quite contrived case but just in case...)
-     chroot_distro_find_all_loopback_mount_points "$mount_point" | sort -r | xargs -I {} umount {} > /dev/null 2>&1
-     # try to unmount everything found
-     # note: using reverse sort to ensure that mounts residing deeper in the file system will be unmounted first
-     chroot_distro_find_all_mount_points "$mount_point" | sort -r | xargs -I {} umount {} > /dev/null 2>&1
-     # then hope for the best...
+    mount_point="$1"
+
+    # 1) Find and kill processes holding files under the mount point.
+    # Prefer lsof if available, otherwise fallback to scanning /proc/*/fd.
+    pids=""
+    if [ "" != "$lsofpath" ]; then
+        pids=$(chroot_distro_find_processes_with_open_files "$mount_point" 2>/dev/null || true)
+    fi
+    if [ -z "$pids" ]; then
+        for fd in /proc/*/fd/*; do
+            target=$(readlink "$fd" 2>/dev/null) || continue
+            case "$target" in
+                *"$mount_point"*) pid=$(echo "$fd" | cut -d'/' -f3); pids="$pids $pid" ;;
+            esac
+        done
+    fi
+    for pid in $pids; do
+        [ -z "$pid" ] && continue
+        kill -9 "$pid" 2>/dev/null || true
+    done
+
+    # 2) Unmount all mount points under the path, deepest first. Try normal umount, then lazy umount.
+    chroot_distro_find_all_mount_points "$mount_point" | sort -r | while read m; do
+        umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
+    done
+
+    # 3) Detach any loop devices that referenced the path. Prefer losetup -d, fallback to parsing /proc/mounts.
+    loopdevs=$(chroot_distro_find_all_loopback_mount_points "$mount_point" 2>/dev/null || true)
+    if [ -z "$loopdevs" ]; then
+        loopdevs=$(awk -v mp="$mount_point" '$2 ~ "^" mp {print $1}' /proc/mounts | grep -Eo '/dev/(loop|block/loop)[0-9]+' | sort -u || true)
+    fi
+    for loopdev in $loopdevs; do
+        [ -z "$loopdev" ] && continue
+        umount "$loopdev" 2>/dev/null || true
+        if command -v losetup >/dev/null 2>&1; then
+            losetup -d "$loopdev" 2>/dev/null || true
+        elif [ -n "$busyboxpath" ]; then
+            "$busyboxpath" losetup -d "$loopdev" 2>/dev/null || true
+        fi
+    done
 }
 
 chroot_distro_mount_system_points() {
     if [ "${CHROOT_DISTRO_MOUNT:-}" = "false" ]; then
        return
     fi
-    chroot_distro_mount_rootfs_image
     distro_path="$1"
+    # If image mode is enabled, ensure the instance image is mounted on the instance path
+    if [ -n "$chroot_distro_image_file" ]; then
+        chroot_distro_mount_rootfs_image "$distro_path"
+    fi
     if [ "1" = "$android_bind_val" ]; then
         mount_android_dirs
     fi
     if [ "1" = "$ram_bind_val" ]; then
-        system_points="$system_points /tmp /run /var/tmp /dev/shm"
+        for d in /tmp /run /var/tmp /dev/shm; do
+            echo " $system_points " | grep -q " $d " || system_points="$system_points $d"
+        done
     fi
     if [ -f "${distro_path}/usr/bin/pacman" ] || [ -f "${distro_path}/bin/pacman" ] || [ -f "${distro_path}/usr/local/bin/pacman" ]; then
-        system_points="${distro_path} ${system_points}"
+        echo " $system_points " | grep -q " ${distro_path} " || system_points="${distro_path} ${system_points}"
     fi
     for point in $system_points; do
         chroot_distro_mount_system_point "$distro_path" "$point" "$distro_path$point"
@@ -1244,9 +1977,24 @@ chroot_distro_unmount_system_point() {
 chroot_distro_unmount_system_points() {
     distro_path="$1"
     force="$2"
-    system_points=$(echo $system_points | tr ' ' '\n' | sort -r | tr '\n' ' ')
+    if [ "1" = "$android_bind_val" ]; then
+        mount_android_dirs
+    fi
+    if [ "1" = "$ram_bind_val" ]; then
+        for d in /tmp /run /var/tmp /dev/shm; do
+            echo " $system_points " | grep -q " $d " || system_points="$system_points $d"
+        done
+    fi
+    if [ -f "${distro_path}/usr/bin/pacman" ] || [ -f "${distro_path}/bin/pacman" ] || [ -f "${distro_path}/usr/local/bin/pacman" ]; then
+        echo " $system_points " | grep -q " ${distro_path} " || system_points="${distro_path} ${system_points}"
+    fi
+    system_points=$(echo $system_points | tr ' ' '\n' | sort -ru | tr '\n' ' ')
     for point in $system_points; do
-        chroot_distro_unmount_system_point "$distro_path$point" "$force"
+        if [ "$point" = "$distro_path" ]; then
+            chroot_distro_unmount_system_point "$distro_path" "$force"
+        else
+            chroot_distro_unmount_system_point "$distro_path$point" "$force"
+        fi
     done
 } 
 
@@ -1400,7 +2148,6 @@ prepare_chroot_distro() {
        echo "3003 aid_inet"
        echo "3004 aid_net_raw"
        echo "1003 aid_graphics"
-       echo "1003 aid_graphics"
        echo "1004 aid_input"
        echo "1005 aid_audio"
        echo "1006 aid_video"
@@ -1415,22 +2162,52 @@ prepare_chroot_distro() {
 } 
 
 chroot_distro_install() {
-    distro=$1
+    input="$1"
+    no_init="$2"
+    no_img="$3"
+    profile_conf=""
+    instance_name=""
+    if profile_conf=$(chroot_distro_profile_resolve_conf "$input"); then
+        # shellcheck disable=SC1090
+        . "$profile_conf"
+        distro="${DISTRIB:-}"
+        suite="${SUITE:-}"
+        if [ -z "$distro" ]; then
+            print_message error "Profile is missing DISTRIB: $profile_conf"
+            chroot_distro_exit 1
+        fi
+        instance_name="$(basename "$profile_conf" .conf)"
+    else
+        print_message error "Profile not found: $input"
+        print_message note "Create one with '${script} profile <name>'"
+        chroot_distro_exit 1
+    fi
     chroot_distro_check_if_supported "$distro"
 
-    chroot_distro_mount_rootfs_image
+    if [ "$no_img" = "yes" ] || [ "${TARGET_TYPE:-file}" = "dir" ]; then
+        chroot_distro_image_file=""
+        chroot_distro_image_size=""
+        print_message info "Image mode disabled for install"
+    else
+        chroot_distro_image_file="${TARGET_PATH:-}"
+        chroot_distro_image_size="${DISK_SIZE:-}"
+        print_message info "Image mode enabled: $chroot_distro_image_file (${chroot_distro_image_size})"
+        mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
+    fi
 
-    archive_path="$chroot_distro_path/.rootfs/$distro.tar.xz"
+    chroot_distro_download_if_needed "$distro" "$suite"
+
+    archive_path="$(chroot_distro_rootfs_archive_path "$distro" "$suite")"
     if [ ! -f "$archive_path" ]; then
         print_message error "The rootfs for '${distro}' has not been downloaded."
         print_message note "Use '${script} download ${distro}' to download it."
         chroot_distro_exit 1
     fi
 
-    distro_path="$chroot_distro_path/$distro"
+    distro_path="$chroot_distro_path/$instance_name"
     if [ -d "$distro_path" ]; then
-        print_message error "The distribution '${distro}' is already installed."
-        print_message note "You can use '$script uninstall ${distro}' to uninstall it or '$script reinstall ${distro}' to reinstall."
+        print_message error "The instance '${instance_name}' is already installed."
+        print_message note "You can use '$script uninstall ${instance_name}' to uninstall it, then run '$script install ${instance_name}' again."
         chroot_distro_exit 1
     fi
 
@@ -1454,12 +2231,18 @@ chroot_distro_install() {
         print_message error "Archive is unsupported or corrupted"
         chroot_distro_exit 5
     fi
+    # If running in image mode, mount the image onto the instance path before unpacking
+    if [ -n "$chroot_distro_image_file" ]; then
+        chroot_distro_mount_rootfs_image "$distro_path"
+    fi
+
     if [ "." = "$rootdir" ]; then
         mkdir -p "$distro_path"
         if ! tar -xf "$archive_path" -C "$distro_path/"; then
             print_message error "Failed to unpack the '${distro}' rootfs archive. The archive may be corrupted or incomplete."
             chroot_distro_exit 5
         fi
+        print_message info "Rootfs unpacked to: $distro_path"
     else
         mkdir -p "$distro_path"
         tar -xf "$archive_path" -C "$chroot_distro_path/"
@@ -1476,10 +2259,37 @@ chroot_distro_install() {
         fi
         mv "$chroot_distro_path/$rootdir"/* "$distro_path"/
         rmdir "$chroot_distro_path/$rootdir" 2>/dev/null
+        print_message info "Rootfs unpacked to: $distro_path"
     fi
 
     chroot_distro_mount_system_points "$distro_path" 
+    print_message info "System mount points ready"
     prepare_chroot_distro "$distro_path" 
+    print_message info "Base chroot preparation complete"
+
+    install_conf_path=""
+    if [ -n "$profile_conf" ]; then
+        install_conf_path="$chroot_distro_path/.config/${instance_name}.conf"
+        cp "$profile_conf" "$install_conf_path"
+        print_message info "Saved install config: $install_conf_path"
+    elif [ -f "$chroot_distro_path/default.conf" ]; then
+        install_conf_path="$chroot_distro_path/.config/${instance_name}.conf"
+        cp "$chroot_distro_path/default.conf" "$install_conf_path"
+        print_message info "Saved install config: $install_conf_path"
+    fi
+
+    if [ "$no_init" != "yes" ] && chroot_distro_init_supported "$distro"; then
+        if [ -n "$install_conf_path" ]; then
+            if chroot_distro_init_run "$distro" "$distro_path" "$install_conf_path"; then
+                print_message info "Init completed"
+            else
+                print_message warning "Init did not complete cleanly"
+            fi
+        else
+            print_message warning "Init skipped: no config available for ${distro}"
+        fi
+    fi
+
     chroot_distro_jail "$distro_path"
 }
 
@@ -1524,11 +2334,15 @@ Please note, that using --force option may close more programs than intended, so
 }
 
 chroot_distro_uninstall() {
-    chroot_distro_check_if_supported "$1" 
+    chroot_distro_resolve_instance "$1"
+    if [ -n "${INSTANCE_CONF:-}" ]; then
+        chroot_distro_check_if_supported "$INSTANCE_DISTRO"
+    fi
 
-    distro_path="$chroot_distro_path/$1"
+    distro_path="$chroot_distro_path/$INSTANCE_NAME"
     force=$2
     command=$3
+    include_profile=$4
 
     if [ -d "$distro_path" ]; then
         if [ "yes" = "$force" ]; then
@@ -1548,21 +2362,40 @@ chroot_distro_uninstall() {
         # ensure that there is no symbolic links before nuking the rootfs, symbolic links may point outside of rootfs when outside of the chroot
         find "$distro_path" -type l -exec "${busyboxpath}" unlink {} \; > /dev/null 2>&1
         rm -rf "$distro_path"
+
+        # Delete associated image file if it exists (only if TARGET_TYPE is not 'dir')
+        if [ -n "$INSTANCE_CONF" ]; then
+            # shellcheck disable=SC1090
+            . "$INSTANCE_CONF"
+            if [ "${TARGET_TYPE:-file}" != "dir" ] && [ -n "${TARGET_PATH:-}" ] && [ -f "${TARGET_PATH}" ]; then
+                rm -f "${TARGET_PATH}"
+                print_message info "Deleted image file: ${TARGET_PATH}"
+            fi
+        fi
+
+        if [ "$include_profile" = "yes" ]; then
+            if [ -f "$chroot_distro_path/.config/${INSTANCE_NAME}.conf" ]; then
+                rm "$chroot_distro_path/.config/${INSTANCE_NAME}.conf"
+            fi
+            print_message info "Uninstalled instance '${INSTANCE_NAME}' and removed its config."
+        else
+            print_message info "Uninstalled instance '${INSTANCE_NAME}'."
+        fi
     else
-        print_message error "$1 not installed"
+        print_message error "${INSTANCE_NAME} not installed"
         chroot_distro_exit 1
     fi
 }
 
 chroot_distro_backup() {
-    distro=$1
+    chroot_distro_resolve_instance "$1"
+    chroot_distro_check_if_supported "$INSTANCE_DISTRO"
     custom_path=$2
-    chroot_distro_check_if_supported "$distro" 
 
-    distro_path="$chroot_distro_path/$1"
+    distro_path="$chroot_distro_path/$INSTANCE_NAME"
     if [ ! -d "$distro_path" ]; then
-        print_message error "The distribution '${distro}' is not installed."
-        print_message note "You can use '${script} install ${distro}' to install the distribution."
+        print_message error "The instance '${INSTANCE_NAME}' is not installed."
+        print_message note "You can use '${script} install ${INSTANCE_NAME}' to install the instance."
         exit
     fi
 
@@ -1572,7 +2405,7 @@ chroot_distro_backup() {
     # the content). If data/sdcard etc. are needed to backup then it is better to do it
     # with different tool (for example twrp) and/or from inside the chroot
     if chroot_distro_check_if_system_points_mounted "$distro_path"; then
-        print_message error "Distro is potentially running - if needed shutdown the distro, and unmount system mount points ($script unmount $1) before proceeding"
+        print_message error "Distro is potentially running - if needed shutdown the distro, and unmount system mount points ($script unmount $INSTANCE_NAME) before proceeding"
         exit
     fi
 
@@ -1591,7 +2424,7 @@ chroot_distro_backup() {
     if [ -n "$mounts" ] || [ -n "$loopbacks" ]; then
         print_message warning "Distro is potentially running - if needed shutdown the distro, and unmount mounted folders"
         print_message info
-        print_message note "To automatically unmount mount points mentioned below, run \`$script unmount -a $1\`"
+        print_message note "To automatically unmount mount points mentioned below, run \`$script unmount -a $INSTANCE_NAME\`"
         print_message info
         print_message info "mount points under $distro_path:"
         print_message info "${mounts:-Not found}"
@@ -1604,18 +2437,23 @@ chroot_distro_backup() {
     fi
 
     if [ "" = "$custom_path" ]; then
-        backup_path="$chroot_distro_path/.backup/$1.tar.xz"
+        backup_path="$chroot_distro_path/.backup/$INSTANCE_NAME.tar.xz"
         if [ -f "$backup_path" ]; then
             print_message error "Backup already exists."
-            print_message note "You can use '\$script unbackup \$distro' to unbackup it."
+            print_message note "You can use '$script unbackup $INSTANCE_NAME' to unbackup it."
             chroot_distro_exit 1
+        fi
+        backup_items="$INSTANCE_NAME"
+        if [ -f "$chroot_distro_path/.config/${INSTANCE_NAME}.conf" ]; then
+            backup_items="$backup_items .config/${INSTANCE_NAME}.conf"
         fi
         (
             cd "$chroot_distro_path" || chroot_distro_exit 1;
-            if ! tar -caf "$backup_path" "$distro" 2>/dev/null; then
+            if ! tar -caf "$backup_path" $backup_items 2>/dev/null; then
                 print_message error "Failed to create the backup."
                 chroot_distro_exit 5
             fi
+            print_message info "Backup created: $backup_path"
         )
     else
         absolute_custom_path="$custom_path"
@@ -1623,12 +2461,17 @@ chroot_distro_backup() {
             # can not have a relative path as current directory will change
             absolute_custom_path="$PWD/$custom_path"
         fi
+        backup_items="$INSTANCE_NAME"
+        if [ -f "$chroot_distro_path/.config/${INSTANCE_NAME}.conf" ]; then
+            backup_items="$backup_items .config/${INSTANCE_NAME}.conf"
+        fi
         (
             cd "$chroot_distro_path" || chroot_distro_exit 1;
-            if ! tar -caf "$absolute_custom_path" "$distro" 2>/dev/null; then
+            if ! tar -caf "$absolute_custom_path" $backup_items 2>/dev/null; then
                 print_message error "Failed to create the backup."
                 chroot_distro_exit 5
             fi
+            print_message info "Backup created: $absolute_custom_path"
         )
     fi
 }
@@ -1659,34 +2502,31 @@ chroot_distro_find_archive_common_path() {
 }
 
 chroot_distro_unbackup() {
-    chroot_distro_check_if_supported "$1"
-
     backup_path="$chroot_distro_path/.backup/$1.tar.xz"
     if [ -f "$backup_path" ]; then
         rm "$backup_path"
+        print_message info "Backup removed: $backup_path"
     else
-        print_message error "No backup found for distribution '$1'."
-        print_message note "You can use '\$script backup \$1' to create one."
+        print_message error "No backup found for instance '$1'."
+        print_message note "You can use '$script backup $1' to create one."
         chroot_distro_exit 1
     fi
 }
 
 chroot_distro_restore() {
-    distro="$1"
+    instance="$1"
     custom_backup_path="$2"
     restore_defaults="$3"
     force="$4"
-    chroot_distro_check_if_supported "$distro"
-
-    distro_path="$chroot_distro_path/$distro"
+    distro_path="$chroot_distro_path/$instance"
     if [ -d "$distro_path" ]; then
-        print_message error "The distribution '$distro' already installed."
-        print_message note "You can use '\$script uninstall \$distro' to uninstall the distribution."
+        print_message error "The instance '$instance' already installed."
+        print_message note "You can use '$script uninstall $instance' to uninstall the instance."
         chroot_distro_exit 1
     fi
 
     if [ "" = "$custom_backup_path" ]; then
-        backup_path="$chroot_distro_path/.backup/$1.tar.xz"
+        backup_path="$chroot_distro_path/.backup/$instance.tar.xz"
     else
         absolute_backup_path="$custom_backup_path"
         if [ "$custom_backup_path" = "${custom_backup_path#/}" ]; then
@@ -1698,7 +2538,7 @@ chroot_distro_restore() {
 
     if [ ! -f "$backup_path" ]; then
         print_message error "Backup not found."
-        print_message note "You can use '\$script backup \$distro' to create a backup."
+        print_message note "You can use '$script backup $instance' to create a backup."
         chroot_distro_exit 1
     fi
 
@@ -1720,12 +2560,26 @@ chroot_distro_restore() {
         chroot_distro_exit 5
     fi
 
+    has_config=no
+    if chroot_distro_archive_has_path "$backup_path" ".config/${instance}.conf"; then
+        has_config=yes
+    fi
+
     if [ "." = "$rootdir" ]; then
         # backup has relative path, restoring is not a problem
-        mkdir -p "$distro_path"
-        if ! tar -xf "$backup_path" -C "$distro_path/" 2>/dev/null; then
-            print_message error "Failed to unpack the archive."
-            chroot_distro_exit 5
+        if [ "$has_config" = "yes" ]; then
+            if ! tar -xf "$backup_path" -C "$chroot_distro_path/" 2>/dev/null; then
+                print_message error "Failed to unpack the archive."
+                chroot_distro_exit 5
+            fi
+            print_message info "Restore completed for $instance"
+        else
+            mkdir -p "$distro_path"
+            if ! tar -xf "$backup_path" -C "$distro_path/" 2>/dev/null; then
+                print_message error "Failed to unpack the archive."
+                chroot_distro_exit 5
+            fi
+            print_message info "Restore completed for $instance"
         fi
     elif [ "data" = "$rootdir" ] && [ "yes" = "$force" ]; then
         # Uses old format of backups. Accept only if user has reviewed the content as the backup needs to be
@@ -1738,6 +2592,7 @@ chroot_distro_restore() {
                 print_message error "Failed to unpack the archive."
                 chroot_distro_exit 5
             fi
+            print_message info "Restore completed for $instance"
         )
     elif [ "data" = "$rootdir" ]; then
         print_message note "Will restore from root directory, review the contents and use --force."
@@ -1745,12 +2600,12 @@ chroot_distro_restore() {
         print_message note "Restore may fail if not enough space on internal storage, and restored files from system mount
 points will be shadowed by system mounts."
         if [ "/$common_path" != "$distro_path" ]; then
-            print_message warning "Backup may be for different distro:"
+            print_message warning "Backup may be for different instance:"
             print_message info "- expected common denominator path: $distro_path"
             print_message info "- archive had following common denominator path: /$common_path"
         fi
         chroot_distro_exit 4
-    elif [ "$distro" = "$rootdir" ]; then
+    elif [ "$instance" = "$rootdir" ]; then
         # new format backups
         (
             cd "$chroot_distro_path" || chroot_distro_exit 1;
@@ -1758,10 +2613,20 @@ points will be shadowed by system mounts."
                 print_message error "Failed to unpack the archive."
                 chroot_distro_exit 5
             fi
+            print_message info "Restore completed for $instance"
         )
     else
-        print_message error "Backup may be for wrong distro (root directory $rootdir), review the backup before proceeding"
+        print_message error "Backup may be for wrong instance (root directory $rootdir), review the backup before proceeding"
         chroot_distro_exit 4
+    fi
+
+    if [ ! -d "$distro_path" ]; then
+        print_message error "Restore failed: instance directory not found after unpacking."
+        chroot_distro_exit 5
+    fi
+
+    if [ ! -f "$chroot_distro_path/.config/${instance}.conf" ]; then
+        print_message warning "Instance config missing: $chroot_distro_path/.config/${instance}.conf"
     fi
 
     chroot_distro_mount_system_points "$distro_path" no
@@ -1778,22 +2643,28 @@ chroot_distro_unmount() {
     all="$3"
 
     if [ "$distro" = "all" ]; then
-       for udistro in $supported_distros; do
-           if [ -d "$chroot_distro_path/$udistro/" ]; then
-               if chroot_distro_check_if_system_points_mounted "$chroot_distro_path/$udistro"; then
-                  chroot_distro_unmount "$udistro" "$force" "$all"
-               fi
+       for dir in "$chroot_distro_path"/*; do
+           [ -d "$dir" ] || continue
+           name=$(basename "$dir")
+           case "$name" in
+               .rootfs|.backup|.config|.profile) continue ;;
+           esac
+           if chroot_distro_check_if_system_points_mounted "$dir"; then
+              chroot_distro_unmount "$name" "$force" "$all"
            fi
-       done 
+       done
        return 0
     fi
 
-    chroot_distro_check_if_supported "$distro" 
+    chroot_distro_resolve_instance "$distro"
+    if [ -n "${INSTANCE_CONF:-}" ]; then
+        chroot_distro_check_if_supported "$INSTANCE_DISTRO"
+    fi
 
-    distro_path="$chroot_distro_path/$distro"
+    distro_path="$chroot_distro_path/$INSTANCE_NAME"
     if [ ! -d "$distro_path" ]; then
-        print_message error "The distribution '$distro' is not installed."
-        print_message note "You can use '\$script install \$distro' to install the distribution."
+        print_message error "The instance '$INSTANCE_NAME' is not installed."
+        print_message note "You can use '$script install $INSTANCE_NAME' to install the instance."
         chroot_distro_exit 1
     fi
 
@@ -1832,17 +2703,30 @@ chroot_distro_unmount() {
         chroot_distro_list_unmount_issues "$distro_path" 'unmount' "$mode" "$force" "$mounts" "$loopbacks" "$open_files"
         exit 1
     fi
+
+    # Final safety check: ensure no mounts/loopbacks remain under distro_path
+    remaining_mounts=$(cat /proc/mounts | grep -F "$distro_path" || true)
+    remaining_loopbacks=$(losetup -a | grep -F "$distro_path" || true)
+    if [ -n "$remaining_mounts" ] || [ -n "$remaining_loopbacks" ]; then
+        print_message error "Unmount incomplete: mounts or loopbacks still present under $distro_path"
+        print_message info "mounts:\n${remaining_mounts:-Not found}"
+        print_message info "loopbacks:\n${remaining_loopbacks:-Not found}"
+        exit 1
+    fi
+
+    print_message info "Unmount complete for $INSTANCE_NAME"
 }
 
 chroot_distro_command() {
-    chroot_distro_check_if_supported "$1"
+    chroot_distro_resolve_instance "$1"
+    chroot_distro_check_if_supported "$INSTANCE_DISTRO"
 
     command="$2"
 
-    distro_path="$chroot_distro_path/$1"
+    distro_path="$chroot_distro_path/$INSTANCE_NAME"
     if [ ! -d "$distro_path" ]; then
-        print_message error "The distribution '$distro' is not installed."
-        print_message note "You can use '\$script install \$distro' to install the distribution."
+        print_message error "The instance '$INSTANCE_NAME' is not installed."
+        print_message note "You can use '$script install $INSTANCE_NAME' to install the instance."
         chroot_distro_exit 1
     fi
 
@@ -1852,12 +2736,13 @@ chroot_distro_command() {
 }
 
 chroot_distro_login() {
-    chroot_distro_check_if_supported "$1"
+    chroot_distro_resolve_instance "$1"
+    chroot_distro_check_if_supported "$INSTANCE_DISTRO"
 
-    distro_path="$chroot_distro_path/$1"
+    distro_path="$chroot_distro_path/$INSTANCE_NAME"
     if [ ! -d "$distro_path" ]; then
-        print_message error "The distribution '$distro' is not installed."
-        print_message note "You can use '\$script install \$distro' to install the distribution."
+        print_message error "The instance '$INSTANCE_NAME' is not installed."
+        print_message note "You can use '$script install $INSTANCE_NAME' to install the instance."
         chroot_distro_exit 1
     fi
 
@@ -1890,24 +2775,22 @@ chroot_distro_rename() {
     old_name="$1"
     new_name="$2"
 
-    # Check if the distro is supported
-    chroot_distro_check_if_supported "$old_name"
-
-    # Check if any file or directory with the new name already exists
-    if [ -e "$chroot_distro_path/.rootfs/${new_name}.tar.xz" ] || [ -e "$chroot_distro_path/.backup/${new_name}.tar.xz" ] || [ -e "$chroot_distro_path/${new_name}" ]; then
-        print_message error "A distribution named '${new_name}' already exists."
+    if [ ! -d "$chroot_distro_path/${old_name}" ]; then
+        print_message error "The instance '${old_name}' is not installed."
         chroot_distro_exit 1
     fi
 
-    # Rename the rootfs file if it exists
-    [ -e "$chroot_distro_path/.rootfs/${old_name}.tar.xz" ] && mv "$chroot_distro_path/.rootfs/${old_name}.tar.xz" "$chroot_distro_path/.rootfs/${new_name}.tar.xz"
+    if [ -e "$chroot_distro_path/${new_name}" ] || [ -e "$chroot_distro_path/.config/${new_name}.conf" ] || [ -e "$chroot_distro_path/.backup/${new_name}.tar.xz" ]; then
+        print_message error "An instance named '${new_name}' already exists."
+        chroot_distro_exit 1
+    fi
 
-    # Rename the backup file if it exists
-    [ -e "$chroot_distro_path/.backup/${old_name}.tar.xz" ] && mv "$chroot_distro_path/.backup/${old_name}.tar.xz" "$chroot_distro_path/.backup/${new_name}.tar.xz"
-
-    # Rename the distro directory if it exists
-    if [ -d "$chroot_distro_path/${old_name}" ]; then
-        chroot_distro_unmount "$old_name" && mv "$chroot_distro_path/${old_name}" "$chroot_distro_path/${new_name}"
+    chroot_distro_unmount "$old_name" && mv "$chroot_distro_path/${old_name}" "$chroot_distro_path/${new_name}"
+    if [ -f "$chroot_distro_path/.config/${old_name}.conf" ]; then
+        mv "$chroot_distro_path/.config/${old_name}.conf" "$chroot_distro_path/.config/${new_name}.conf"
+    fi
+    if [ -f "$chroot_distro_path/.backup/${old_name}.tar.xz" ]; then
+        mv "$chroot_distro_path/.backup/${old_name}.tar.xz" "$chroot_distro_path/.backup/${new_name}.tar.xz"
     fi
 }
 
@@ -1915,20 +2798,52 @@ chroot_distro_remove() {
     distro="$1"
     chroot_distro_check_if_supported "$distro"
 
-    if [ -e "$chroot_distro_path/.config/${distro}" ]; then
-        rm "$chroot_distro_path/.config/${distro}" 
-    fi
-    
-    if [ -e "$chroot_distro_path/.rootfs/${distro}.tar.xz" ]; then
-        chroot_distro_delete "${distro}" 
+    suites=$(chroot_distro_collect_rootfs_suites "$distro")
+    instances_suites=""
+    for conf in "$chroot_distro_path/.config/"*.conf; do
+        [ -f "$conf" ] || continue
+        # shellcheck disable=SC1090
+        . "$conf"
+        if [ "${DISTRIB:-}" != "$distro" ]; then
+            continue
+        fi
+        suite_label=$(chroot_distro_suite_label "${SUITE:-}")
+        case " $instances_suites " in
+            *" $suite_label "*) ;;
+            *) instances_suites="$instances_suites $suite_label" ;;
+        esac
+    done
+
+    if [ -z "$suites" ] && [ -z "$instances_suites" ]; then
+        print_message error "No rootfs or instances found for '${distro}'."
+        chroot_distro_exit 1
     fi
 
-    if [ -e "$chroot_distro_path/.backup/${distro}.tar.xz" ]; then
-        chroot_distro_unbackup "${distro}"
+    suite_options="$suites"
+    for s in $instances_suites; do
+        case " $suite_options " in
+            *" $s "*) ;;
+            *) suite_options="$suite_options $s" ;;
+        esac
+    done
+
+    set -- $suite_options
+    if [ $# -gt 1 ]; then
+        suite_selected=$(profile_prompt_select "Select suite to remove" "" $suite_options)
+    else
+        suite_selected="$1"
     fi
 
-    if [ -e "$chroot_distro_path/${distro}" ]; then
-        chroot_distro_uninstall "${distro}" -f "remove" 
+    suite_normalized=$(chroot_distro_suite_normalize "$suite_selected")
+    instances=$(chroot_distro_collect_instances_for_distro "$distro" "$suite_selected")
+    for instance in $instances; do
+        chroot_distro_uninstall "$instance" -f "remove" no
+    done
+
+    archive_path=$(chroot_distro_rootfs_archive_path "$distro" "$suite_normalized")
+    if [ -f "$archive_path" ]; then
+        rm "$archive_path"
+        print_message info "Rootfs removed for '${distro}' (${suite_selected})"
     fi
 }
 
@@ -1982,10 +2897,15 @@ elif [ "$command" = "list" ]; then
     fi
     chroot_distro_list "${installed_distros}" 
 elif [ "$command" = "download" ]; then
-    PARSED=$(getopt --options= --longoptions= --name "$0" -- "$@") || chroot_distro_exit 2
+    PARSED=$(getopt --options= --longoptions=force --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
+    force=no
     while true; do
         case "$1" in
+            --force)
+                force=yes
+                shift
+                ;;
             --)
                 shift
                 break
@@ -2003,30 +2923,7 @@ elif [ "$command" = "download" ]; then
         chroot_distro_user_check_parameters
     fi
     chroot_distro_warn_if_unsupported_busybox
-    chroot_distro_download "$1" "$2" 
-elif [ "$command" = "redownload" ]; then
-    PARSED=$(getopt --options= --longoptions= --name "$0" -- "$@") || chroot_distro_exit 2
-    eval set -- "$PARSED"
-    while true; do
-        case "$1" in
-            --)
-                shift
-                break
-                ;;
-            *)
-                print_message error "Programming error"
-                chroot_distro_exit 3
-                break
-                ;;
-        esac
-    done
-    if [ $# -eq 0 ]; then
-        chroot_distro_missing_distro
-    elif [ $# -gt 2 ]; then
-        chroot_distro_user_check_parameters
-    fi 
-    chroot_distro_delete "$1" 
-    chroot_distro_download "$1" "$2"
+    chroot_distro_download "$1" "$2" "" "$force" 
 elif [ "$command" = "delete" ]; then
     PARSED=$(getopt --options= --longoptions= --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
@@ -2050,10 +2947,20 @@ elif [ "$command" = "delete" ]; then
     fi
     chroot_distro_delete "$1"
 elif [ "$command" = "install" ]; then
-    PARSED=$(getopt --options= --longoptions= --name "$0" -- "$@") || chroot_distro_exit 2
+    PARSED=$(getopt --options= --longoptions=no-init,no-img --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
+    no_init=no
+    no_img=no
     while true; do
         case "$1" in
+            --no-init)
+                no_init=yes
+                shift
+                ;;
+            --no-img)
+                no_img=yes
+                shift
+                ;;
             --)
                 shift
                 break
@@ -2071,15 +2978,20 @@ elif [ "$command" = "install" ]; then
         chroot_distro_user_check_parameters
     fi
     chroot_distro_warn_if_unsupported_busybox
-    chroot_distro_install "$1" 
+    chroot_distro_install "$1" "$no_init" "$no_img"
 elif [ "$command" = "uninstall" ]; then
-    PARSED=$(getopt --options=f --longoptions=force --name "$0" -- "$@") || chroot_distro_exit 2
+    PARSED=$(getopt --options=f --longoptions=force,include-profile --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
     force=no
+    include_profile=no
     while true; do
         case "$1" in
             -f|--force)
                 force=yes
+                shift
+                ;;
+            --include-profile)
+                include_profile=yes
                 shift
                 ;;
             --)
@@ -2098,36 +3010,7 @@ elif [ "$command" = "uninstall" ]; then
     elif [ $# -ne 1 ]; then
         chroot_distro_user_check_parameters
     fi
-    chroot_distro_uninstall "$1" "$force" "$command"
-elif [ "$command" = "reinstall" ]; then
-    OPTS=af LONGOPTS=force
-    PARSED=$(getopt --options=$OPTS --longoptions=$LONGOPTS --name "$0" -- "$@") || chroot_distro_exit 2
-    eval set -- "$PARSED"
-    force=no
-    while true; do
-        case "$1" in
-            -f|--force)
-                force=yes
-                shift
-                ;;
-            --)
-                shift
-                break
-                ;;
-            *)
-                print_message error "Programming error"
-                chroot_distro_exit 3
-                break
-                ;;
-        esac
-    done
-    if [ $# -eq 0 ]; then
-        chroot_distro_missing_distro
-    elif [ $# -ne 1 ]; then
-        chroot_distro_user_check_parameters
-    fi
-    chroot_distro_uninstall "$1" "$force" "$command"
-    chroot_distro_install "$1" 
+    chroot_distro_uninstall "$1" "$force" "$command" "$include_profile"
 elif [ "$command" = "backup" ]; then
     PARSED=$(getopt --options= --longoptions= --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
@@ -2251,6 +3134,26 @@ elif [ "$command" = "login" ]; then
         chroot_distro_user_check_parameters
     fi
     chroot_distro_login "$1"
+elif [ "$command" = "profile" ]; then
+    PARSED=$(getopt --options= --longoptions= --name "$0" -- "$@") || chroot_distro_exit 2
+    eval set -- "$PARSED"
+    while true; do
+        case "$1" in
+            --)
+                shift
+                break
+                ;;
+            *)
+                print_message error "Programming error"
+                chroot_distro_exit 3
+                break
+                ;;
+        esac
+    done
+    if [ $# -gt 1 ]; then
+        chroot_distro_user_check_parameters
+    fi
+    chroot_distro_profile "${1:-}"
 elif [ "$command" = "mount" ]; then
     PARSED=$(getopt --options= --longoptions= --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
@@ -2272,7 +3175,9 @@ elif [ "$command" = "mount" ]; then
     elif [ $# -ne 1 ]; then
         chroot_distro_user_check_parameters
     fi
-    chroot_distro_mount_system_points "${chroot_distro_path}/$1"
+    chroot_distro_resolve_instance "$1"
+    chroot_distro_check_if_supported "$INSTANCE_DISTRO"
+    chroot_distro_mount_system_points "${chroot_distro_path}/$INSTANCE_NAME"
 elif [ "$command" = "unmount" ]; then
     PARSED=$(getopt --options=fa --longoptions=force,all --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
