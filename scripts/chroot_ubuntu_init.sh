@@ -46,8 +46,20 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+# Normalize config path: prefer absolute paths; if relative, resolve against cwd and /root/.chd-init
+case "$conf_file" in
+  /*) : ;;
+  *)
+    if [ -f "./$conf_file" ]; then
+      conf_file="$(pwd)/$conf_file"
+    elif [ -f "/root/.chd-init/$conf_file" ]; then
+      conf_file="/root/.chd-init/$conf_file"
+    fi
+    ;;
+esac
+
 if [ -z "$conf_file" ] || [ ! -f "$conf_file" ]; then
-  log "ERROR: no input config file"
+  log "ERROR: no input config file: ${conf_file:-<empty>}"
   exit 1
 fi
 
@@ -117,6 +129,17 @@ printf "nameserver 8.8.8.8\n" > /etc/resolv.conf
 log "CMD: write /etc/hosts"
 printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
 
+# Ensure Android-specific groups and memberships exist BEFORE any apt network operations.
+# Some chroot environments lack `groupadd`/`usermod` but we can create group entries
+# and append users directly to /etc/group as a fallback so APT (which downloads as
+# the `_apt` user) has network permission.
+groupadd -g 3003 aid_inet
+groupadd -g 3004 aid_net_raw
+groupadd -g 1003 aid_graphics
+usermod -g 3003 -G 3003,3004 -a _apt
+usermod -G 3003 -a root
+
+
 ensure_base_tools() {
   need_install=""
   for cmd in id getent groupadd usermod adduser; do
@@ -144,30 +167,6 @@ ensure_base_tools() {
 }
 
 ensure_base_tools
-
-if getent group aid_inet >/dev/null 2>&1; then
-  log "aid_inet group already exists"
-else
-  run groupadd -g 3003 aid_inet
-fi
-if getent group aid_net_raw >/dev/null 2>&1; then
-  log "aid_net_raw group already exists"
-else
-  run groupadd -g 3004 aid_net_raw
-fi
-if getent group aid_graphics >/dev/null 2>&1; then
-  log "aid_graphics group already exists"
-else
-  run groupadd -g 1003 aid_graphics
-fi
-
-if id _apt >/dev/null 2>&1; then
-  log "_apt user found, applying Android network groups"
-  run usermod -g 3003 -G 3003,3004 -a _apt || true
-else
-  log "_apt user not found, skipping"
-fi
-run usermod -G 3003 -a root || true
 
 log "[Step 7] apt update/upgrade + base tools"
 run apt update
@@ -229,6 +228,7 @@ if [ "${CHROOT_PULSE}" = "true" ]; then
   log "PulseAudio enabled"
   run apt install -y libasound2-plugins
   if [ -d /etc/profile.d ]; then
+# Install base tools early so `groupadd`/`usermod` exist before use.
     log "CMD: write /etc/profile.d/pulse.sh"
     printf "PULSE_SERVER=%s:%s\nexport PULSE_SERVER\n" "${CHROOT_PULSE_HOST}" "${CHROOT_PULSE_PORT}" > /etc/profile.d/pulse.sh
   fi

@@ -1,6 +1,6 @@
 id=chroot-distro
 name=chroot-distro
-version=3.0.0
+version=3.0.11
 versionCode=17
 author=@lota09
 description=Install Gnu/Linux distributions on Android

@@ -68,10 +68,13 @@ if [ "${user_id}" -ne 0 ]; then
 fi
 
 chroot_distro_mount_rootfs_image() {
+    # Mount the currently selected image file onto the given mount point.
+    # Usage: chroot_distro_mount_rootfs_image [mount_point]
+    mount_point="${1:-$chroot_distro_path}"
     if [ -z "$chroot_distro_image_file" ]; then
         return
     fi
-    if grep -wq "$chroot_distro_path" /proc/mounts; then
+    if grep -wq "$mount_point" /proc/mounts; then
         return
     fi
     if [ ! -f "$chroot_distro_image_file" ]; then
@@ -101,17 +104,17 @@ chroot_distro_mount_rootfs_image() {
     else
         print_message info "Rootfs image exists, skipping create: $chroot_distro_image_file"
     fi
-    mkdir -p "$chroot_distro_path"
-    if ! mount -o rw,relatime "$chroot_distro_image_file" "$chroot_distro_path"; then
+    mkdir -p "$mount_point"
+    if ! mount -o rw,relatime "$chroot_distro_image_file" "$mount_point"; then
         # Some Android builds require an explicit filesystem type and loop option for images.
-        if ! mount -t ext4 -o loop,rw,relatime "$chroot_distro_image_file" "$chroot_distro_path"; then
-            print_message error "Failed to mount rootfs image on $chroot_distro_path"
+        if ! mount -t ext4 -o loop,rw,relatime "$chroot_distro_image_file" "$mount_point"; then
+            print_message error "Failed to mount rootfs image on $mount_point"
             print_message note "If this is a new image, format it first: mke2fs -t ext4 $chroot_distro_image_file"
             chroot_distro_exit 1
         fi
     fi
-    print_message info "Rootfs image mounted on $chroot_distro_path"
-    mount -o remount,exec,suid,dev "$chroot_distro_path" >/dev/null 2>&1 || true
+    print_message info "Rootfs image mounted on $mount_point"
+    mount -o remount,exec,suid,dev "$mount_point" >/dev/null 2>&1 || true
 }
 
 architecture=$(uname -m)
@@ -496,7 +499,6 @@ if ! tar --help 2>&1 | grep -q -- "-J" ; then
 fi
 
 mkdir -p "$chroot_distro_path"
-chroot_distro_mount_rootfs_image
 mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup"
 
 config_dir="$chroot_distro_path/.config"
@@ -1017,6 +1019,9 @@ chroot_distro_init_run() {
     cp "$conf_file" "$chroot_conf"
     chmod 700 "$chroot_script"
 
+    # Ensure chroot has a working resolver (create stub or file if needed)
+    chroot_distro_fix_env "$distro_path" || true
+
     print_message info "Running init inside chroot: $script_name"
     chroot "$distro_path" /bin/sh "/root/.chd-init/$script_name" --conf "/root/.chd-init/profile.conf"
 }
@@ -1351,7 +1356,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-    3.0.8 (Staging)
+    3.0.11 (Stable confirmed : ubuntu noble)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -1475,7 +1480,7 @@ chroot_distro_download() {
     download_url_override="${2:-}"
     download_suite="${3:-}"
     force_overwrite="${4:-}"
-    chroot_distro_mount_rootfs_image
+    # Do not auto-mount the top-level path; downloads write into $chroot_distro_path/.rootfs
     chroot_distro_check_if_supported "$distro"
     
     if [ -n "$download_url_override" ] && [ -n "$download_suite" ]; then
@@ -1738,12 +1743,24 @@ chroot_distro_find_processes_with_open_files() {
 
 chroot_distro_find_all_mount_points() {
     path="$1"
-    cat /proc/mounts | grep -F "$path" | awk '{print $2}'
+    # normalize path (remove trailing slash) to match entries in /proc/mounts
+    path="${path%/}"
+    # print mount targets that are the path itself or descendents of the path
+    awk -v p="$path" '($2==p) || (substr($2,1,length(p)+1)==p"/") {print $2}' /proc/mounts || true
 }
 
 chroot_distro_find_all_loopback_mount_points() {
     path="$1"
-    losetup -a | grep -F "$path" | grep -Eo '^[^:]+'
+    path="${path%/}"
+    # Prefer losetup listing if available (handles loop devices with backing files)
+    if command -v losetup >/dev/null 2>&1; then
+        losetup -a | grep -F "$path" | grep -Eo '^[^:]+' || true
+    elif [ -n "$busyboxpath" ] && [ -x "$busyboxpath" ]; then
+        "$busyboxpath" losetup -a | grep -F "$path" | grep -Eo '^[^:]+' || true
+    else
+        # Fallback: parse /proc/mounts for devices under the path that look like loop devices
+        awk -v p="$path" '($2==p) || (substr($2,1,length(p)+1)==p"/") { if ($1 ~ /^\/dev\/(loop|block\/loop)[0-9]+/) print $1 }' /proc/mounts || true
+    fi
 }
 
 chroot_distro_delete() {
@@ -1870,25 +1887,57 @@ mount_android_dirs() {
 }
 
 chroot_distro_force_unmount() {
-     mount_point="$1"
-     # first try to kill all processes before trying to unmount anything
-     # note: close from earlier to later processes to ensure that no new worker processes are created during killing
-     chroot_distro_find_processes_with_open_files "$mount_point" | xargs -I {} kill -9 {} > /dev/null 2>&1
-     # before normal unmounts, go through all loopback devices
-     # note: in reverse order in case there is loopback mount from inside the loopback mount (quite contrived case but just in case...)
-     chroot_distro_find_all_loopback_mount_points "$mount_point" | sort -r | xargs -I {} umount {} > /dev/null 2>&1
-     # try to unmount everything found
-     # note: using reverse sort to ensure that mounts residing deeper in the file system will be unmounted first
-     chroot_distro_find_all_mount_points "$mount_point" | sort -r | xargs -I {} umount {} > /dev/null 2>&1
-     # then hope for the best...
+    mount_point="$1"
+
+    # 1) Find and kill processes holding files under the mount point.
+    # Prefer lsof if available, otherwise fallback to scanning /proc/*/fd.
+    pids=""
+    if [ "" != "$lsofpath" ]; then
+        pids=$(chroot_distro_find_processes_with_open_files "$mount_point" 2>/dev/null || true)
+    fi
+    if [ -z "$pids" ]; then
+        for fd in /proc/*/fd/*; do
+            target=$(readlink "$fd" 2>/dev/null) || continue
+            case "$target" in
+                *"$mount_point"*) pid=$(echo "$fd" | cut -d'/' -f3); pids="$pids $pid" ;;
+            esac
+        done
+    fi
+    for pid in $pids; do
+        [ -z "$pid" ] && continue
+        kill -9 "$pid" 2>/dev/null || true
+    done
+
+    # 2) Unmount all mount points under the path, deepest first. Try normal umount, then lazy umount.
+    chroot_distro_find_all_mount_points "$mount_point" | sort -r | while read m; do
+        umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
+    done
+
+    # 3) Detach any loop devices that referenced the path. Prefer losetup -d, fallback to parsing /proc/mounts.
+    loopdevs=$(chroot_distro_find_all_loopback_mount_points "$mount_point" 2>/dev/null || true)
+    if [ -z "$loopdevs" ]; then
+        loopdevs=$(awk -v mp="$mount_point" '$2 ~ "^" mp {print $1}' /proc/mounts | grep -Eo '/dev/(loop|block/loop)[0-9]+' | sort -u || true)
+    fi
+    for loopdev in $loopdevs; do
+        [ -z "$loopdev" ] && continue
+        umount "$loopdev" 2>/dev/null || true
+        if command -v losetup >/dev/null 2>&1; then
+            losetup -d "$loopdev" 2>/dev/null || true
+        elif [ -n "$busyboxpath" ]; then
+            "$busyboxpath" losetup -d "$loopdev" 2>/dev/null || true
+        fi
+    done
 }
 
 chroot_distro_mount_system_points() {
     if [ "${CHROOT_DISTRO_MOUNT:-}" = "false" ]; then
        return
     fi
-    chroot_distro_mount_rootfs_image
     distro_path="$1"
+    # If image mode is enabled, ensure the instance image is mounted on the instance path
+    if [ -n "$chroot_distro_image_file" ]; then
+        chroot_distro_mount_rootfs_image "$distro_path"
+    fi
     if [ "1" = "$android_bind_val" ]; then
         mount_android_dirs
     fi
@@ -2143,10 +2192,8 @@ chroot_distro_install() {
         chroot_distro_image_file="${TARGET_PATH:-}"
         chroot_distro_image_size="${DISK_SIZE:-}"
         print_message info "Image mode enabled: $chroot_distro_image_file (${chroot_distro_image_size})"
+        mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
     fi
-
-    chroot_distro_mount_rootfs_image
-    mkdir -p "$chroot_distro_path/.rootfs" "$chroot_distro_path/.backup" "$chroot_distro_path/.config"
 
     chroot_distro_download_if_needed "$distro" "$suite"
 
@@ -2184,6 +2231,11 @@ chroot_distro_install() {
         print_message error "Archive is unsupported or corrupted"
         chroot_distro_exit 5
     fi
+    # If running in image mode, mount the image onto the instance path before unpacking
+    if [ -n "$chroot_distro_image_file" ]; then
+        chroot_distro_mount_rootfs_image "$distro_path"
+    fi
+
     if [ "." = "$rootdir" ]; then
         mkdir -p "$distro_path"
         if ! tar -xf "$archive_path" -C "$distro_path/"; then
