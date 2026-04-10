@@ -133,50 +133,34 @@ printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
 # Some chroot environments lack `groupadd`/`usermod` but we can create group entries
 # and append users directly to /etc/group as a fallback so APT (which downloads as
 # the `_apt` user) has network permission.
-groupadd -g 3003 aid_inet
-groupadd -g 3004 aid_net_raw
-groupadd -g 1003 aid_graphics
+getent group aid_inet >/dev/null 2>&1 || groupadd -g 3003 aid_inet
+getent group aid_net_raw >/dev/null 2>&1 || groupadd -g 3004 aid_net_raw
+getent group aid_graphics >/dev/null 2>&1 || groupadd -g 1003 aid_graphics
 usermod -g 3003 -G 3003,3004 -a _apt
 usermod -G 3003 -a root
-
-
-ensure_base_tools() {
-  need_install=""
-  for cmd in id getent groupadd usermod adduser; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-      need_install="yes"
-      break
-    fi
-  done
-  if [ -z "$need_install" ]; then
-    return 0
-  fi
-
-  if command -v apt-get >/dev/null 2>&1; then
-    log "Installing base tools (coreutils, passwd, adduser, libc-bin)"
-    apt-get update
-    apt-get install -y coreutils passwd adduser libc-bin
-  elif command -v apt >/dev/null 2>&1; then
-    log "Installing base tools (coreutils, passwd, adduser, libc-bin)"
-    apt update
-    apt install -y coreutils passwd adduser libc-bin
-  else
-    log "ERROR: apt/apt-get not found; cannot install required tools."
-    exit 1
-  fi
-}
-
-ensure_base_tools
 
 log "[Step 7] apt update/upgrade + base tools"
 run apt update
 run apt upgrade -y
-run apt install -y vim net-tools sudo git
+run apt install -y coreutils passwd adduser libc-bin
+run apt install -y vim net-tools sudo git dbus-x11
 
 log "[Step 8] Timezone configuration"
-# Step 8: timezone (non-interactive)
+# Ensure debconf runs noninteractive and preseed tzdata to avoid prompts
+export DEBIAN_FRONTEND=noninteractive
+# Preseed tzdata to avoid interactive prompts
+TZ_VALUE="${TIMEZONE:-$(cat /etc/timezone 2>/dev/null || true)}"
+[ -z "${TZ_VALUE}" ] && TZ_VALUE="Etc/UTC"
+AREA="${TZ_VALUE%%/*}"
+ZONE="${TZ_VALUE#*/}"
+printf "tzdata tzdata/Areas select %s\n" "${AREA}" | debconf-set-selections || true
+printf "tzdata tzdata/Zones/%s select %s\n" "${AREA}" "${ZONE}" | debconf-set-selections || true
 run apt install -y tzdata
-run dpkg-reconfigure tzdata
+printf "%s\n" "${TZ_VALUE}" > /etc/timezone
+if [ -f "/usr/share/zoneinfo/${TZ_VALUE}" ]; then
+  ln -sf "/usr/share/zoneinfo/${TZ_VALUE}" /etc/localtime
+fi
+dpkg-reconfigure -f noninteractive tzdata || true
 
 log "[Step 9] User creation and groups"
 # Step 9: user creation (Ubuntu default: adduser creates user group)
@@ -245,9 +229,12 @@ fi
 
 log "[Step 11] Locales"
 # Step 11: locales
+LOCALE_TO_GEN="${LOCALE:-en_US.UTF-8}"
+printf "locales locales/locales_to_be_generated multiselect %s UTF-8\n" "${LOCALE_TO_GEN}" | debconf-set-selections || true
+printf "locales locales/default_environment_locale select %s\n" "${LOCALE_TO_GEN}" | debconf-set-selections || true
 run apt install -y locales
-run locale-gen en_US.UTF-8
-run update-locale LANG=en_US.UTF-8
+run locale-gen "${LOCALE_TO_GEN}"
+run update-locale LANG="${LOCALE_TO_GEN}"
 
 log "[Step 12] Desktop environment"
 # Step 12: desktop environment
@@ -311,13 +298,19 @@ case "${CHROOT_DESKTOP}" in
   # Linux Deploy extra: vnc
   if [ "${CHROOT_VNC}" = "true" ]; then
     log "VNC enabled"
-    run apt install -y tightvncserver
+    run apt install -y tigervnc-standalone-server
     vnc_home="/home/${CHROOT_USER}/.vnc"
     run mkdir -p "${vnc_home}"
     log "CMD: write VNC password"
     echo "${CHROOT_VNC_PASS}" | vncpasswd -f > "${vnc_home}/passwd" || true
     run chmod 600 "${vnc_home}/passwd"
-    run ln -sf ../.xinitrc "${vnc_home}/xstartup"
+  cat > "${vnc_home}/xstartup" <<'EOF'
+#!/bin/sh
+export XKL_XMODMAP_DISABLE=1
+export DISPLAY=:${CHROOT_VNC_DISPLAY}
+exec dbus-launch --exit-with-session startxfce4
+EOF
+  run chmod +x "${vnc_home}/xstartup"
     user_group="$(id -gn "${CHROOT_USER}")"
     run chown -R "${CHROOT_USER}:${user_group}" "${vnc_home}"
     printf "VNC ready: :%s %sx%s depth %s\n" "${CHROOT_VNC_DISPLAY}" "${CHROOT_VNC_WIDTH}" "${CHROOT_VNC_HEIGHT}" "${CHROOT_VNC_DEPTH}"

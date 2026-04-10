@@ -1888,14 +1888,18 @@ mount_android_dirs() {
 
 chroot_distro_force_unmount() {
     mount_point="$1"
+    print_message info "[unmount] Force unmounting all under $mount_point"
 
     # 1) Find and kill processes holding files under the mount point.
     # Prefer lsof if available, otherwise fallback to scanning /proc/*/fd.
     pids=""
+    print_message info "[unmount] Step 1: Finding processes with open files..."
     if [ "" != "$lsofpath" ]; then
+        print_message info "[unmount] Trying lsof..."
         pids=$(chroot_distro_find_processes_with_open_files "$mount_point" 2>/dev/null || true)
     fi
     if [ -z "$pids" ]; then
+        print_message info "[unmount] Scanning /proc/*/fd for open files (lsof fallback)..."
         for fd in /proc/*/fd/*; do
             target=$(readlink "$fd" 2>/dev/null) || continue
             case "$target" in
@@ -1903,30 +1907,38 @@ chroot_distro_force_unmount() {
             esac
         done
     fi
+    print_message info "[unmount] Killing processes: ${pids:-none}"
     for pid in $pids; do
         [ -z "$pid" ] && continue
         kill -9 "$pid" 2>/dev/null || true
     done
 
     # 2) Unmount all mount points under the path, deepest first. Try normal umount, then lazy umount.
+    print_message info "[unmount] Step 2: Unmounting deeply nested mount points..."
     chroot_distro_find_all_mount_points "$mount_point" | sort -r | while read m; do
-        umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true
+        print_message info "[unmount] Umounting $m"
+        umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || print_message warning "[unmount] Failed to umount $m"
     done
 
     # 3) Detach any loop devices that referenced the path. Prefer losetup -d, fallback to parsing /proc/mounts.
+    print_message info "[unmount] Step 3: Detaching loop devices..."
     loopdevs=$(chroot_distro_find_all_loopback_mount_points "$mount_point" 2>/dev/null || true)
     if [ -z "$loopdevs" ]; then
+        print_message info "[unmount] parsing /proc/mounts for loop devices (fallback)..."
         loopdevs=$(awk -v mp="$mount_point" '$2 ~ "^" mp {print $1}' /proc/mounts | grep -Eo '/dev/(loop|block/loop)[0-9]+' | sort -u || true)
     fi
+    print_message info "[unmount] Loop devices to detach: ${loopdevs:-none}"
     for loopdev in $loopdevs; do
         [ -z "$loopdev" ] && continue
+        print_message info "[unmount] Detaching $loopdev"
         umount "$loopdev" 2>/dev/null || true
         if command -v losetup >/dev/null 2>&1; then
-            losetup -d "$loopdev" 2>/dev/null || true
+            losetup -d "$loopdev" 2>/dev/null || print_message warning "[unmount] Failed to losetup -d $loopdev"
         elif [ -n "$busyboxpath" ]; then
-            "$busyboxpath" losetup -d "$loopdev" 2>/dev/null || true
+            "$busyboxpath" losetup -d "$loopdev" 2>/dev/null || print_message warning "[unmount] Failed to busybox losetup -d $loopdev"
         fi
     done
+    print_message info "[unmount] Force unmount completed for $mount_point"
 }
 
 chroot_distro_mount_system_points() {
@@ -1954,6 +1966,52 @@ chroot_distro_mount_system_points() {
     done
 }
 
+chroot_distro_start_runtime_services() {
+    distro_path="$1"
+    # profile copied to /root/.chd-init/profile.conf during install
+    conf="$distro_path/root/.chd-init/profile.conf"
+    if [ ! -f "$conf" ]; then
+        return 0
+    fi
+    # shellcheck disable=SC1090
+    . "$conf" || return 0
+
+    : ${USER_NAME:=${USER_NAME:-root}}
+    : ${VNC_DISPLAY:=${VNC_DISPLAY:-1}}
+    : ${VNC_WIDTH:=${VNC_WIDTH:-800}}
+    : ${VNC_HEIGHT:=${VNC_HEIGHT:-480}}
+    : ${VNC_DEPTH:=${VNC_DEPTH:-16}}
+
+    # Start SSH inside chroot (runs as root)
+    if echo " $INCLUDE " | grep -q " extra/ssh "; then
+        chroot "$distro_path" /bin/sh -lc 'mkdir -p /var/run/sshd; if [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd || true; else printf "[chroot-start] sshd missing\n" >&2; fi' >/dev/null 2>&1 &
+    fi
+
+    # Start PulseAudio inside chroot (try per-user, fallback to root)
+    if echo " $INCLUDE " | grep -q " extra/pulse "; then
+        if chroot "$distro_path" /bin/sh -c 'command -v pulseaudio >/dev/null 2>&1' >/dev/null 2>&1; then
+            chroot "$distro_path" /bin/sh -lc "if getent passwd \"$USER_NAME\" >/dev/null 2>&1; then su - $USER_NAME -c 'pulseaudio --start || true'; else pulseaudio --start || true; fi" >/dev/null 2>&1 &
+        fi
+    fi
+
+    # Start VNC inside chroot for configured user
+    if echo " $INCLUDE " | grep -q " graphics/vnc "; then
+        # choose desktop command based on DESKTOP
+        case "${DESKTOP:-}" in
+            lxde) desktop_cmd='exec dbus-launch --exit-with-session startlxde' ;;
+            mate) desktop_cmd='exec dbus-launch --exit-with-session mate-session' ;;
+            xfce) desktop_cmd='exec dbus-launch --exit-with-session startxfce4' ;;
+            kde) desktop_cmd='exec dbus-launch --exit-with-session startplasma-x11' ;;
+            xterm) desktop_cmd='exec /usr/bin/xterm' ;;
+            *) desktop_cmd='exec dbus-launch --exit-with-session startxfce4' ;;
+        esac
+
+        chroot "$distro_path" /bin/sh -lc "user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); vnc_home=\"\$user_home/.vnc\"; mkdir -p \"\$vnc_home\"; printf '%s\n' '#!/bin/sh' 'export XKL_XMODMAP_DISABLE=1' 'export DISPLAY=:$VNC_DISPLAY' '$desktop_cmd' > \"\$vnc_home/xstartup\"; chmod +x \"\$vnc_home/xstartup\"; chown -R \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$vnc_home\"; su - \"$USER_NAME\" -c 'vncserver :$VNC_DISPLAY -geometry ${VNC_WIDTH}x${VNC_HEIGHT} -depth ${VNC_DEPTH} -localhost no'" >/dev/null 2>&1 &
+    fi
+
+    return 0
+}
+
 chroot_distro_unmount_system_point() {
     mount_point="$1"
     force="$2"
@@ -1969,8 +2027,11 @@ chroot_distro_unmount_system_point() {
        chroot_distro_force_unmount "$mount_point/" 
     fi
     # no need to check for the success as the caller will take care of that
+    print_message info "[unmount] Unmounting system point $mount_point"
     if ! umount "$mount_point" > /dev/null 2>&1; then
-    print_message warning "Failed to unmount $mount_point"
+        print_message warning "Failed to unmount $mount_point"
+    else
+        print_message info "[unmount] Successfully unmounted $mount_point"
     fi
 }
 
@@ -2290,6 +2351,7 @@ chroot_distro_install() {
         fi
     fi
 
+    chroot_distro_start_runtime_services "$distro_path"
     chroot_distro_jail "$distro_path"
 }
 
@@ -2345,23 +2407,31 @@ chroot_distro_uninstall() {
     include_profile=$4
 
     if [ -d "$distro_path" ]; then
+        print_message info "[uninstall] Starting uninstall for $INSTANCE_NAME..."
         if [ "yes" = "$force" ]; then
+            print_message info "[uninstall] Force flag used, forcing unmount under $distro_path/..."
             chroot_distro_force_unmount "$distro_path/" 
         fi
+        print_message info "[uninstall] Unmounting system points..."
         chroot_distro_unmount_system_points "$distro_path" no
-        mounts=$(cat /proc/mounts | grep -F "$distro_path")
-        loopbacks=$(losetup -a | grep -F "$distro_path")
-        open_files=$(lsof | grep -F "$distro_path")
+        
+        print_message info "[uninstall] Checking for remaining mounts, loopbacks, and open files..."
+        mounts=$(cat /proc/mounts | grep -F "$distro_path" || true)
+        loopbacks=$(losetup -a | grep -F "$distro_path" || true)
+        open_files=$(lsof | grep -F "$distro_path" || true)
         if [ "" != "$mounts" ] || [ "" != "$loopbacks" ] || [ "" != "$open_files" ]; then
+            print_message info "[uninstall] Remaining issues detected. Aborting uninstall."
             chroot_distro_list_unmount_issues "$distro_path" "$command" 'all' "$force" "$mounts" "$loopbacks" "$open_files"
             exit 1
         fi
 
         # when reaching this point it is assumed that uninstalling the distro is ok, no irreversible changes to distro before this line
 
+        print_message info "[uninstall] Nuking rootfs directory at $distro_path..."
         # ensure that there is no symbolic links before nuking the rootfs, symbolic links may point outside of rootfs when outside of the chroot
         find "$distro_path" -type l -exec "${busyboxpath}" unlink {} \; > /dev/null 2>&1
         rm -rf "$distro_path"
+        print_message info "[uninstall] Rootfs directory removed."
 
         # Delete associated image file if it exists (only if TARGET_TYPE is not 'dir')
         if [ -n "$INSTANCE_CONF" ]; then
@@ -2634,6 +2704,9 @@ points will be shadowed by system mounts."
     if [ "yes" = "$restore_defaults" ]; then
        prepare_chroot_distro "$distro_path" 
     fi
+
+    chroot_distro_start_runtime_services "$distro_path"
+
     chroot_distro_jail "$distro_path"
 }
 
@@ -2732,6 +2805,8 @@ chroot_distro_command() {
 
     chroot_distro_mount_system_points "$distro_path" no
 
+    chroot_distro_start_runtime_services "$distro_path"
+
     chroot_distro_jail "$distro_path" "$command"
 }
 
@@ -2747,6 +2822,8 @@ chroot_distro_login() {
     fi
 
     chroot_distro_mount_system_points "$distro_path" no
+
+    chroot_distro_start_runtime_services "$distro_path"
 
     chroot_distro_jail "$distro_path"
 }
@@ -3178,6 +3255,7 @@ elif [ "$command" = "mount" ]; then
     chroot_distro_resolve_instance "$1"
     chroot_distro_check_if_supported "$INSTANCE_DISTRO"
     chroot_distro_mount_system_points "${chroot_distro_path}/$INSTANCE_NAME"
+    chroot_distro_start_runtime_services "${chroot_distro_path}/$INSTANCE_NAME"
 elif [ "$command" = "unmount" ]; then
     PARSED=$(getopt --options=fa --longoptions=force,all --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
