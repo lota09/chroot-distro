@@ -10,12 +10,13 @@ fi
 
 # Auto-install if missing
 if ! command -v pulseaudio >/dev/null 2>&1; then
-    echo "pulseaudio not found. Attempting auto-installation..." >> "$LOGFILE" 2>&1
-    pkg update -y && pkg install -y pulseaudio >> "$LOGFILE" 2>&1
+    echo "pulseaudio not found. Attempting auto-installation (pkg install) in Termux..."
+    pkg update -y && pkg install -y pulseaudio
     if [ $? -ne 0 ]; then
-        cat "$LOGFILE"
+        echo "Auto-installation failed! Please check your internet connection."
         exit 1
     fi
+    echo "Installation complete."
 fi
 
 # Start the pulse daemon with TCP native protocol listening on localhost

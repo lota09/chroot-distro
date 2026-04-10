@@ -12,12 +12,13 @@ fi
 
 # Auto-install if missing
 if ! command -v virgl_test_server >/dev/null 2>&1; then
-    echo "virgl_test_server not found. Attempting auto-installation..." >> "$LOGFILE" 2>&1
-    pkg update -y && pkg install -y x11-repo && pkg install -y virglrenderer-android >> "$LOGFILE" 2>&1
+    echo "virgl_test_server not found. Attempting auto-installation (pkg install) in Termux..."
+    pkg update -y && pkg install -y x11-repo && pkg install -y virglrenderer-android
     if [ $? -ne 0 ]; then
-        cat "$LOGFILE"
+        echo "Auto-installation failed! Please check your internet connection."
         exit 1
     fi
+    echo "Installation complete."
 fi
 
 # Start optimized GPU renderer via Turnip/Zink

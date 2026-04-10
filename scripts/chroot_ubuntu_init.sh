@@ -361,6 +361,17 @@ Pin-Priority: -10
 EOF
 log_result Success "Init: Disable snapd"
 
+# Step 15: Global environment configuration (PULSE_SERVER, DISPLAY)
+log "=== Init: Environment Orchestration ==="
+cat <<EOF > "/etc/profile.d/chd_env.sh"
+#!/bin/sh
+export PULSE_SERVER=tcp:127.0.0.1:4713
+export DISPLAY=:0
+EOF
+chmod 644 "/etc/profile.d/chd_env.sh"
+log_result Success "Init: Environment orchestration variables"
+
+# Final results
 cat <<EOF
 Done.
 

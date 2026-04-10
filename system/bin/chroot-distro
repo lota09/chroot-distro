@@ -1019,12 +1019,6 @@ chroot_distro_init_run() {
     script_name="chroot_${distro}_init.sh"
     host_script_dir="$chroot_distro_path/scripts"
     module_script_dir="/data/adb/modules/chroot-distro/scripts"
-    
-    if [ -d "$module_script_dir" ]; then
-        mkdir -p "$host_script_dir"
-        cp -af "$module_script_dir"/* "$host_script_dir/"
-        chmod -R 755 "$host_script_dir"
-    fi
 
     host_script="$chroot_distro_path/scripts/$script_name"
     chroot_init_dir="$distro_path/root/.chd-init"
@@ -1386,7 +1380,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-    3.0.11 (Stable confirmed : ubuntu noble)
+    3.1.0 (staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -2035,13 +2029,13 @@ chroot_distro_start_runtime_services() {
     # Start PulseAudio on HOST TERMUX
     if echo " $INCLUDE " | grep -q " extra/pulse "; then
         printf "Starting Host PulseAudio... "
-        pulse_out=$(host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_pulseaudio.sh" 2>&1)
+        host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_pulseaudio.sh" > /data/local/tmp/chd_host_out 2>&1
         if [ $? -eq 0 ]; then
             echo "Success"
         else
             echo "Failed"
             echo "--- PulseAudio Start Log ---"
-            echo "$pulse_out"
+            cat /data/local/tmp/chd_host_out
             echo "----------------------------"
         fi
     fi
@@ -2085,13 +2079,13 @@ chroot_distro_start_runtime_services() {
         fi
         
         printf "Starting Host Virgl Server... "
-        virgl_out=$(host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" 2>&1)
+        host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" > /data/local/tmp/chd_host_out 2>&1
         if [ $? -eq 0 ]; then
             echo "Success"
         else
             echo "Failed"
             echo "--- Virgl Server Start Log ---"
-            echo "$virgl_out"
+            cat /data/local/tmp/chd_host_out
             echo "------------------------------"
         fi
     fi
