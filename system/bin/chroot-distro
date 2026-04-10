@@ -131,9 +131,10 @@ host_run_in_termux() {
         "$@"
         return
     fi
-    # Drop root privileges down to the Termux Android App User.
+    # Drop root privileges down to the Termux Android App User with Network GIDs.
+    # Specify each supplementary group individually to satisfy MagiskSU syntax.
     # Inject essential ENVs so Termux dynamic linker and binaries locate their shared libraries.
-    su "$TERMUX_USER" -c "env PREFIX=$TERMUX_DIR/files/usr \
+    su "$TERMUX_USER" -G 3003 -G 3004 -G 3005 -c "env PREFIX=$TERMUX_DIR/files/usr \
 LD_LIBRARY_PATH=$TERMUX_DIR/files/usr/lib \
 PATH=$TERMUX_DIR/files/usr/bin:$TERMUX_DIR/files/usr/bin/applets:/system/bin \
 HOME=$TERMUX_DIR/files/home \
@@ -1380,7 +1381,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-    3.1.0 (staging)
+    3.1.1 (staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -1849,8 +1850,15 @@ chroot_distro_mount_system_point() {
         return
     fi
     if [ "$path_to_mount" = "/tmp" ]; then
-       if [ "${CHROOT_DISTRO_TMP:-}" == "false" ]; then
+       if [ "${CHROOT_DISTRO_TMP:-}" = "false" ]; then
           return 
+       fi
+       # Termux host tmp directory for socket sharing (X11, Virgl)
+       TERMUX_TMP="/data/data/com.termux/files/usr/tmp"
+       if [ -d "$TERMUX_TMP" ]; then
+           if mount --bind "$TERMUX_TMP" "$mount_point"; then
+               return
+           fi
        fi
        if ! mount -t tmpfs tmpfs "$mount_point"; then
             print_message error "Failed to mount tmpfs on $mount_point"
@@ -2294,6 +2302,13 @@ chroot_distro_jail() {
         (
             # try to ensure that su will do as proper login as possible to ensure consistent environment
             unset PREFIX;
+            # Automatic graphics and audio environment injection
+            export DISPLAY=:0
+            export PULSE_SERVER=tcp:127.0.0.1:4713
+            export GALLIUM_DRIVER=virpipe
+            export MESA_GL_VERSION_OVERRIDE=4.0
+            export MESA_GLES_VERSION_OVERRIDE=3.2
+
             if [ "" != "$command" ]; then
                 # shellcheck disable=SC1007
                 PATH= chroot "$distro_path/" "$su_command" - root -c "$command"
@@ -2324,6 +2339,13 @@ chroot_distro_jail() {
         unset BOOTCLASSPATH;
         unset SYSTEMSERVERCLASSPATH;
         unset LD_LIBRARY_PATH;
+        # Automatic graphics and audio environment injection
+        export DISPLAY=:0
+        export PULSE_SERVER=tcp:127.0.0.1:4713
+        export GALLIUM_DRIVER=virpipe
+        export MESA_GL_VERSION_OVERRIDE=4.0
+        export MESA_GLES_VERSION_OVERRIDE=3.2
+
         if [ "" != "$command" ]; then
             SHELL=/bin/sh HOME="$JAIL_HOME" PATH="$JAIL_PATH" chroot "$distro_path/" /bin/sh -lc "$command"
         else
