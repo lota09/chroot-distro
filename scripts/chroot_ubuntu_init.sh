@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# Ensure standard paths are available inside a minimal rootfs.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 DEBUG_TRACE="${DEBUG_TRACE:-false}"
 if [ "${DEBUG_TRACE}" = "true" ]; then
   set -x
@@ -10,14 +14,18 @@ log() {
   printf "%s\n" "$*"
 }
 
+> /tmp/chd_init_summary.log || true
+
+log_result() {
+  echo "[$1] $2" >> /tmp/chd_init_summary.log || true
+}
+
+log_result Ignored "Init: Environment setup"
+
 run() {
   log "CMD: $*"
   "$@"
 }
-
-# Ensure standard paths are available inside a minimal rootfs.
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
 
 if command -v id >/dev/null 2>&1; then
   if [ "$(id -u)" -ne 0 ]; then
@@ -122,7 +130,7 @@ if [ -z "${CHROOT_USER}" ]; then
   exit 1
 fi
 
-log "[Step 7] Network + Android group mappings"
+log "=== Init: Network + Android group mappings ==="
 # Step 7: basic network + Android group mappings
 log "CMD: write /etc/resolv.conf"
 printf "nameserver 8.8.8.8\n" > /etc/resolv.conf
@@ -138,14 +146,16 @@ getent group aid_net_raw >/dev/null 2>&1 || groupadd -g 3004 aid_net_raw
 getent group aid_graphics >/dev/null 2>&1 || groupadd -g 1003 aid_graphics
 usermod -g 3003 -G 3003,3004 -a _apt
 usermod -G 3003 -a root
+log_result Success "Init: Network + Android group mappings"
 
-log "[Step 7] apt update/upgrade + base tools"
+log "=== Init: apt update/upgrade + base tools ==="
 run apt update
 run apt upgrade -y
 run apt install -y coreutils passwd adduser libc-bin
-run apt install -y vim net-tools sudo git dbus-x11
+run apt install -y vim net-tools sudo git dbus-x11 mesa-utils pulseaudio-utils alsa-utils
+log_result Success "Init: apt update/upgrade + base tools"
 
-log "[Step 8] Timezone configuration"
+log "=== Init: Timezone configuration ==="
 # Ensure debconf runs noninteractive and preseed tzdata to avoid prompts
 export DEBIAN_FRONTEND=noninteractive
 # Preseed tzdata to avoid interactive prompts
@@ -161,8 +171,9 @@ if [ -f "/usr/share/zoneinfo/${TZ_VALUE}" ]; then
   ln -sf "/usr/share/zoneinfo/${TZ_VALUE}" /etc/localtime
 fi
 dpkg-reconfigure -f noninteractive tzdata || true
+log_result Success "Init: Timezone configuration"
 
-log "[Step 9] User creation and groups"
+log "=== Init: User creation and groups ==="
 # Step 9: user creation (Ubuntu default: adduser creates user group)
 if getent group storage >/dev/null 2>&1; then
   log "storage group already exists"
@@ -187,14 +198,16 @@ if [ -n "${CHROOT_PASS}" ]; then
 else
   log "No CHROOT_PASS provided, skipping password set"
 fi
+log_result Success "Init: User creation and groups"
 
-log "[Step 10] Sudoers configuration"
+log "=== Init: Sudoers configuration ==="
 # Step 10: sudoers drop-in (avoids visudo)
 log "CMD: write /etc/sudoers.d/99-${CHROOT_USER}"
 printf "%s ALL=(ALL:ALL) ALL\n" "${CHROOT_USER}" > "/etc/sudoers.d/99-${CHROOT_USER}"
 run chmod 440 "/etc/sudoers.d/99-${CHROOT_USER}"
+log_result Success "Init: Sudoers configuration"
 
-log "[Step 10] SSH setup (optional)"
+log "=== Init: SSH setup (optional) ==="
 # Linux Deploy extra: ssh
 if [ "${CHROOT_SSH}" = "true" ]; then
   log "SSH enabled"
@@ -202,11 +215,18 @@ if [ "${CHROOT_SSH}" = "true" ]; then
   run sed -i -E 's/#?PasswordAuthentication .*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
   run sed -i -E 's/#?PermitRootLogin .*/PermitRootLogin yes/g' /etc/ssh/sshd_config
   run sed -i -E 's/#?AcceptEnv .*/AcceptEnv LANG/g' /etc/ssh/sshd_config
+  run mkdir -p /run/sshd /var/run/sshd
+  run ssh-keygen -A || true
+  if getent passwd sshd >/dev/null 2>&1; then
+    run usermod -aG aid_inet sshd || true
+  fi
+  log_result Success "Init: SSH setup (optional)"
 else
   log "SSH disabled"
+  log_result Ignored "Init: SSH setup (optional)"
 fi
 
-log "[Step 10] PulseAudio setup (optional)"
+log "=== Init: PulseAudio setup (optional) ==="
 # Linux Deploy extra: pulse
 if [ "${CHROOT_PULSE}" = "true" ]; then
   log "PulseAudio enabled"
@@ -223,11 +243,13 @@ if [ "${CHROOT_PULSE}" = "true" ]; then
     echo "pcm.pulse { type pulse }"
     echo "ctl.pulse { type pulse }"
   } > /etc/asound.conf
+  log_result Success "Init: PulseAudio setup (optional)"
 else
   log "PulseAudio disabled"
+  log_result Ignored "Init: PulseAudio setup (optional)"
 fi
 
-log "[Step 11] Locales"
+log "=== Init: Locales ==="
 # Step 11: locales
 LOCALE_TO_GEN="${LOCALE:-en_US.UTF-8}"
 printf "locales locales/locales_to_be_generated multiselect %s UTF-8\n" "${LOCALE_TO_GEN}" | debconf-set-selections || true
@@ -235,8 +257,9 @@ printf "locales locales/default_environment_locale select %s\n" "${LOCALE_TO_GEN
 run apt install -y locales
 run locale-gen "${LOCALE_TO_GEN}"
 run update-locale LANG="${LOCALE_TO_GEN}"
+log_result Success "Init: Locales"
 
-log "[Step 12] Desktop environment"
+log "=== Init: Desktop environment ==="
 # Step 12: desktop environment
 case "${CHROOT_DESKTOP}" in
   lxde)
@@ -293,40 +316,38 @@ case "${CHROOT_DESKTOP}" in
     exit 1
     ;;
  esac
+log_result Success "Init: Desktop environment"
 
-  log "[Step 12] VNC setup (optional)"
-  # Linux Deploy extra: vnc
-  if [ "${CHROOT_VNC}" = "true" ]; then
-    log "VNC enabled"
-    run apt install -y tigervnc-standalone-server
-    vnc_home="/home/${CHROOT_USER}/.vnc"
-    run mkdir -p "${vnc_home}"
-    log "CMD: write VNC password"
-    echo "${CHROOT_VNC_PASS}" | vncpasswd -f > "${vnc_home}/passwd" || true
-    run chmod 600 "${vnc_home}/passwd"
-  cat > "${vnc_home}/xstartup" <<'EOF'
-#!/bin/sh
-export XKL_XMODMAP_DISABLE=1
-export DISPLAY=:${CHROOT_VNC_DISPLAY}
-exec dbus-launch --exit-with-session startxfce4
-EOF
-  run chmod +x "${vnc_home}/xstartup"
-    user_group="$(id -gn "${CHROOT_USER}")"
-    run chown -R "${CHROOT_USER}:${user_group}" "${vnc_home}"
-    printf "VNC ready: :%s %sx%s depth %s\n" "${CHROOT_VNC_DISPLAY}" "${CHROOT_VNC_WIDTH}" "${CHROOT_VNC_HEIGHT}" "${CHROOT_VNC_DEPTH}"
+  log "=== Init: Display Backend Orchestration ==="
+  HAS_X11=false
+  HAS_VNC=false
+  if [ "${CHROOT_X11}" = "true" ]; then HAS_X11=true; fi
+  if [ "${CHROOT_VNC}" = "true" ]; then HAS_VNC=true; fi
+
+  if [ "$HAS_X11" = "true" ] && [ "$HAS_VNC" = "false" ]; then
+      log "Termux:X11 mode selected."
+      log_result Success "Init: Display Backend Orchestration"
+  elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "false" ]; then
+      log "VNC mode selected. Installing TigerVNC..."
+      run apt install -y tigervnc-standalone-server
+      vnc_home="/home/${CHROOT_USER}/.vnc"
+      run mkdir -p "${vnc_home}"
+      log "CMD: write VNC password"
+      echo "${CHROOT_VNC_PASS}" | vncpasswd -f > "${vnc_home}/passwd" || true
+      run chmod 600 "${vnc_home}/passwd"
+      user_group="$(id -gn "${CHROOT_USER}")"
+      run chown -R "${CHROOT_USER}:${user_group}" "${vnc_home}"
+      log_result Success "Init: Display Backend Orchestration"
+  elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "true" ]; then
+      log "X11+VNC Mirror mode selected. Installing x11vnc..."
+      run apt install -y x11vnc
+      log_result Success "Init: Display Backend Orchestration"
   else
-    log "VNC disabled"
+      log "No Display Backend selected (CLI only mode)."
+      log_result Ignored "Init: Display Backend Orchestration"
   fi
 
-  log "[Step 12] X11 setup (optional)"
-  # Linux Deploy extra: x11 hint
-  if [ "${CHROOT_X11}" = "true" ]; then
-    echo "X11 ready. Use: export DISPLAY=127.0.0.1:0"
-  else
-    log "X11 disabled"
-  fi
-
-log "[Step 13] Disable snapd"
+log "=== Init: Disable snapd ==="
 # Step 13: disable snapd
 run apt-get autopurge -y snapd || true
 log "CMD: write /etc/apt/preferences.d/nosnap.pref"
@@ -338,9 +359,15 @@ Package: snapd
 Pin: release a=*
 Pin-Priority: -10
 EOF
+log_result Success "Init: Disable snapd"
 
 cat <<EOF
 Done.
+
+Install Result Summary
+----------------------------------------
+$(cat /tmp/chd_init_summary.log 2>/dev/null || echo "No results recorded")
+----------------------------------------
 
 Next steps (run from host):
 - Start the desktop with chroot-distro command, for example:

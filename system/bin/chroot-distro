@@ -56,6 +56,10 @@ else
     fi
 fi
 
+# Ensure essential directories exist
+mkdir -p "$chroot_distro_path/log" >/dev/null 2>&1
+mkdir -p "$chroot_distro_path/.config" >/dev/null 2>&1
+
 chroot_distro_image_file=""
 chroot_distro_image_size=""
 
@@ -117,6 +121,26 @@ chroot_distro_mount_rootfs_image() {
     mount -o remount,exec,suid,dev "$mount_point" >/dev/null 2>&1 || true
 }
 
+host_run_in_termux() {
+    local TERMUX_DIR="/data/data/com.termux"
+    local TERMUX_USER
+    # Termux user is identical to the owner of the main termux directory in Android
+    TERMUX_USER=$(stat -c %U "$TERMUX_DIR" 2>/dev/null)
+    if [ -z "$TERMUX_USER" ] || [ "$TERMUX_USER" = "root" ]; then
+        # Fallback if unresolvable, though this usually breaks Termux binaries missing LD_LIBRARY_PATH
+        "$@"
+        return
+    fi
+    # Drop root privileges down to the Termux Android App User.
+    # Inject essential ENVs so Termux dynamic linker and binaries locate their shared libraries.
+    su "$TERMUX_USER" -c "env PREFIX=$TERMUX_DIR/files/usr \
+LD_LIBRARY_PATH=$TERMUX_DIR/files/usr/lib \
+PATH=$TERMUX_DIR/files/usr/bin:$TERMUX_DIR/files/usr/bin/applets:/system/bin \
+HOME=$TERMUX_DIR/files/home \
+TMPDIR=$TERMUX_DIR/files/usr/tmp \
+$*"
+}
+
 architecture=$(uname -m)
 
 case "${architecture}" in
@@ -132,7 +156,7 @@ supported_distros="alpine arch artix debian deepin fedora manjaro openkylin open
 for distro in "${chroot_distro_path}"/.config/*; do
     distro="$(basename "${distro}")"
     case "$distro" in
-      ram_bind|fix_suid|android_bind)
+      *.conf|ram_bind|fix_suid|android_bind)
         ;;
       *)
         echo " $supported_distros " | grep -q " $distro " && continue
@@ -418,7 +442,7 @@ if [ "" != "$check_env" ]; then
                         # Get length of hex string to handle different formats
                         hex_len=${#clean_hex}
 
-                        # Handle small hex values (≤ 2 digits)
+                        # Handle small hex values (??2 digits)
                         if [ "$hex_len" -le 2 ]; then
                             major=0
                             minor=0
@@ -993,19 +1017,21 @@ chroot_distro_init_run() {
     distro_path="$2"
     conf_file="$3"
     script_name="chroot_${distro}_init.sh"
+    host_script_dir="$chroot_distro_path/scripts"
+    module_script_dir="/data/adb/modules/chroot-distro/scripts"
+    
+    if [ -d "$module_script_dir" ]; then
+        mkdir -p "$host_script_dir"
+        cp -af "$module_script_dir"/* "$host_script_dir/"
+        chmod -R 755 "$host_script_dir"
+    fi
+
     host_script="$chroot_distro_path/scripts/$script_name"
-    module_script="/data/adb/modules/chroot-distro/scripts/$script_name"
     chroot_init_dir="$distro_path/root/.chd-init"
     chroot_script="$chroot_init_dir/$script_name"
     chroot_conf="$chroot_init_dir/profile.conf"
 
-    if [ -f "$module_script" ]; then
-        mkdir -p "$chroot_distro_path/scripts"
-        if [ ! -f "$host_script" ] || ! cmp -s "$module_script" "$host_script"; then
-            cp "$module_script" "$host_script"
-            print_message info "Init script synced: $host_script"
-        fi
-    elif [ ! -f "$host_script" ]; then
+    if [ ! -f "$host_script" ]; then
         print_message warning "Init script not found: $host_script"
         return 1
     fi
@@ -1023,7 +1049,7 @@ chroot_distro_init_run() {
     chroot_distro_fix_env "$distro_path" || true
 
     print_message info "Running init inside chroot: $script_name"
-    chroot "$distro_path" /bin/sh "/root/.chd-init/$script_name" --conf "/root/.chd-init/profile.conf"
+    chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; /bin/sh /root/.chd-init/$script_name --conf /root/.chd-init/profile.conf"
 }
 
 chroot_distro_profile() {
@@ -1108,7 +1134,7 @@ chroot_distro_profile() {
 
     DISTRO_OPTIONS="$supported_distros"
     DESKTOP_OPTIONS="xfce lxde mate xterm"
-    GRAPHICS_OPTIONS="vnc x11"
+    GRAPHICS_OPTIONS="vnc x11 vnc+x11"
     ARCH_OPTIONS="arm64 armhf amd64 i386"
     FS_TYPE_OPTIONS="ext4 f2fs xfs"
     TARGET_TYPE_OPTIONS="file dir"
@@ -1166,7 +1192,7 @@ chroot_distro_profile() {
         SSH_ARGS="${SSH_ARGS:-}"
     fi
 
-    if [ "$GRAPHICS" = "vnc" ]; then
+    if [ "$GRAPHICS" = "vnc" ] || [ "$GRAPHICS" = "vnc+x11" ]; then
         VNC_ENABLE="true"
         VNC_DISPLAY=$(profile_prompt_typed "VNC display" "$VNC_DISPLAY_DEFAULT" uint)
         VNC_WIDTH=$(profile_prompt_typed "VNC width" "$VNC_WIDTH_DEFAULT" uint)
@@ -1184,7 +1210,8 @@ chroot_distro_profile() {
         VNC_ARGS="${VNC_ARGS:-}"
     fi
 
-    if [ "$GRAPHICS" = "x11" ]; then
+    if [ "$GRAPHICS" = "x11" ] || [ "$GRAPHICS" = "vnc+x11" ]; then
+        profile_log "[NOTICE] X11 Graphics requires the 'Termux:X11' Android app installed and running."
         X11_HOST=$(profile_prompt_default "X11 host" "$X11_HOST_DEFAULT")
         X11_DISPLAY=$(profile_prompt_typed "X11 display" "$X11_DISPLAY_DEFAULT" uint)
         X11_SDL=$(profile_prompt_yes_no "Enable X11 SDL" "$X11_SDL_DEFAULT")
@@ -1207,17 +1234,15 @@ chroot_distro_profile() {
 
     ADVANCED_ENABLE=$(profile_prompt_yes_no "Configure advanced options" "false")
     if [ "$ADVANCED_ENABLE" = "true" ]; then
+        VIRGL_ENABLE=$(profile_prompt_yes_no "Enable GPU Acceleration (Virgl/Zink)" "false")
+        if [ "$VIRGL_ENABLE" = "true" ]; then
+            profile_log "[NOTICE] GPU Acceleration requires the 'Termux' app, plus 'virglrenderer' and 'mesa-zink' packages installed within Termux."
+        fi
         ARCH=$(profile_prompt_select_or_custom "Arch" "$ARCH_DEFAULT" $ARCH_OPTIONS)
         FS_TYPE=$(profile_prompt_select_or_custom "Filesystem" "$FS_TYPE_DEFAULT" $FS_TYPE_OPTIONS)
         TARGET_TYPE=$(profile_prompt_select_or_custom "Target type" "$TARGET_TYPE_DEFAULT" $TARGET_TYPE_OPTIONS)
         LOCALE=$(profile_prompt_default "Locale" "$LOCALE_DEFAULT")
         SOURCE_PATH=$(profile_prompt_default "Ubuntu mirror" "$SOURCE_PATH_DEFAULT")
-        MOUNTS=$(profile_prompt_default "Mounts" "$MOUNTS_DEFAULT")
-        INIT_DEFAULT=$(profile_prompt_default "Init" "$INIT_DEFAULT")
-        INIT_ASYNC_DEFAULT=$(profile_prompt_default "Init async" "$INIT_ASYNC_DEFAULT")
-        INIT_LEVEL_DEFAULT=$(profile_prompt_default "Init level" "$INIT_LEVEL_DEFAULT")
-        INIT_PATH_DEFAULT=$(profile_prompt_default "Init path" "$INIT_PATH_DEFAULT")
-        INIT_USER_DEFAULT=$(profile_prompt_default "Init user" "$INIT_USER_DEFAULT")
     else
         ARCH="$ARCH_DEFAULT"
         FS_TYPE="$FS_TYPE_DEFAULT"
@@ -1230,8 +1255,13 @@ chroot_distro_profile() {
     INCLUDE="bootstrap desktop graphics init"
     [ "$SSH_ENABLE" = "true" ] && INCLUDE="$INCLUDE extra/ssh"
     [ "$PULSE_ENABLE" = "true" ] && INCLUDE="$INCLUDE extra/pulse"
-    [ "$GRAPHICS" = "vnc" ] && INCLUDE="$INCLUDE graphics/vnc"
-    [ "$GRAPHICS" = "x11" ] && INCLUDE="$INCLUDE graphics/x11"
+    if [ "$GRAPHICS" = "vnc" ] || [ "$GRAPHICS" = "vnc+x11" ]; then
+        INCLUDE="$INCLUDE graphics/vnc"
+    fi
+    if [ "$GRAPHICS" = "x11" ] || [ "$GRAPHICS" = "vnc+x11" ]; then
+        INCLUDE="$INCLUDE graphics/x11"
+    fi
+    [ "$VIRGL_ENABLE" = "true" ] && INCLUDE="$INCLUDE hardware/virgl"
 
     cat > "$profile_path" <<EOF
 ARCH="$ARCH"
@@ -1962,7 +1992,13 @@ chroot_distro_mount_system_points() {
         echo " $system_points " | grep -q " ${distro_path} " || system_points="${distro_path} ${system_points}"
     fi
     for point in $system_points; do
-        chroot_distro_mount_system_point "$distro_path" "$point" "$distro_path$point"
+        printf "%sMounting %s... %s" "" "$point" ""
+        if chroot_distro_mount_system_point "$distro_path" "$point" "$distro_path$point" > ""$chroot_distro_path/log/chd_mount.log 2>&1; then
+            echo "Success"
+        else
+            echo "Failed"
+            cat ""$chroot_distro_path/log/chd_mount.log
+        fi
     done
 }
 
@@ -1982,31 +2018,132 @@ chroot_distro_start_runtime_services() {
     : ${VNC_HEIGHT:=${VNC_HEIGHT:-480}}
     : ${VNC_DEPTH:=${VNC_DEPTH:-16}}
 
+    # Initialize composite log file
+    > "$chroot_distro_path/log/chd_startup.log"
+
     # Start SSH inside chroot (runs as root)
     if echo " $INCLUDE " | grep -q " extra/ssh "; then
-        chroot "$distro_path" /bin/sh -lc 'mkdir -p /var/run/sshd; if [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd || true; else printf "[chroot-start] sshd missing\n" >&2; fi' >/dev/null 2>&1 &
-    fi
-
-    # Start PulseAudio inside chroot (try per-user, fallback to root)
-    if echo " $INCLUDE " | grep -q " extra/pulse "; then
-        if chroot "$distro_path" /bin/sh -c 'command -v pulseaudio >/dev/null 2>&1' >/dev/null 2>&1; then
-            chroot "$distro_path" /bin/sh -lc "if getent passwd \"$USER_NAME\" >/dev/null 2>&1; then su - $USER_NAME -c 'pulseaudio --start || true'; else pulseaudio --start || true; fi" >/dev/null 2>&1 &
+        printf "Starting SSH... "
+        if chroot "$distro_path" /bin/sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; mkdir -p /run/sshd /var/run/sshd; if [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd; else printf "sshd missing\n" >&2; exit 2; fi' >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+            echo "Success"
+        else
+            echo "Failed"
+            cat "$chroot_distro_path/log/chd_startup.log"
         fi
     fi
 
-    # Start VNC inside chroot for configured user
-    if echo " $INCLUDE " | grep -q " graphics/vnc "; then
-        # choose desktop command based on DESKTOP
-        case "${DESKTOP:-}" in
-            lxde) desktop_cmd='exec dbus-launch --exit-with-session startlxde' ;;
-            mate) desktop_cmd='exec dbus-launch --exit-with-session mate-session' ;;
-            xfce) desktop_cmd='exec dbus-launch --exit-with-session startxfce4' ;;
-            kde) desktop_cmd='exec dbus-launch --exit-with-session startplasma-x11' ;;
-            xterm) desktop_cmd='exec /usr/bin/xterm' ;;
-            *) desktop_cmd='exec dbus-launch --exit-with-session startxfce4' ;;
-        esac
+    # Start PulseAudio on HOST TERMUX
+    if echo " $INCLUDE " | grep -q " extra/pulse "; then
+        printf "Starting Host PulseAudio... "
+        pulse_out=$(host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_pulseaudio.sh" 2>&1)
+        if [ $? -eq 0 ]; then
+            echo "Success"
+        else
+            echo "Failed"
+            echo "--- PulseAudio Start Log ---"
+            echo "$pulse_out"
+            echo "----------------------------"
+        fi
+    fi
 
-        chroot "$distro_path" /bin/sh -lc "user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); vnc_home=\"\$user_home/.vnc\"; mkdir -p \"\$vnc_home\"; printf '%s\n' '#!/bin/sh' 'export XKL_XMODMAP_DISABLE=1' 'export DISPLAY=:$VNC_DISPLAY' '$desktop_cmd' > \"\$vnc_home/xstartup\"; chmod +x \"\$vnc_home/xstartup\"; chown -R \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$vnc_home\"; su - \"$USER_NAME\" -c 'vncserver :$VNC_DISPLAY -geometry ${VNC_WIDTH}x${VNC_HEIGHT} -depth ${VNC_DEPTH} -localhost no'" >/dev/null 2>&1 &
+    HAS_X11=false
+    HAS_VNC=false
+    echo " $INCLUDE " | grep -q " graphics/x11 " && HAS_X11=true
+    echo " $INCLUDE " | grep -q " graphics/vnc " && HAS_VNC=true
+
+    if [ "$HAS_X11" = "true" ]; then
+        if [ ! -d "/data/data/com.termux.x11" ]; then
+            printf "\n\n[CRITICAL ERROR] Termux:X11 is required but not installed!\n" >&2
+            printf "Please install the 'Termux:X11' Android app to use X11 Graphics.\n" >&2
+            printf "Aborting X11 Initialization...\n\n" >&2
+            return 1
+        fi
+        
+        printf "Starting Host Termux:X11 bindings... "
+        mkdir -p /data/data/com.termux/files/usr/tmp/.X11-unix
+        mkdir -p "$distro_path/tmp/.X11-unix"
+        # Bind the Termux X socket directory into the chroot namespace so guest apps can talk to Termux:X11 natively
+        mount --bind /data/data/com.termux/files/usr/tmp/.X11-unix "$distro_path/tmp/.X11-unix" >/dev/null 2>&1 || true
+        
+        x11_out=$(host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_x11.sh" 2>&1)
+        if [ $? -eq 0 ]; then
+            echo "Success"
+        else
+            echo "Failed"
+            echo "--- X11 Host Log ---"
+            echo "$x11_out"
+            echo "--------------------"
+        fi
+    fi
+
+    if echo " $INCLUDE " | grep -q " hardware/virgl "; then
+        if [ ! -d "/data/data/com.termux" ]; then
+            printf "\n\n[CRITICAL ERROR] Termux environment is required for Virgl/GPU Acceleration but not installed!\n" >&2
+            printf "Please install 'Termux' to use Host GPU Acceleration.\n" >&2
+            printf "Aborting GPU Initialization...\n\n" >&2
+            return 1
+        fi
+        
+        printf "Starting Host Virgl Server... "
+        virgl_out=$(host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" 2>&1)
+        if [ $? -eq 0 ]; then
+            echo "Success"
+        else
+            echo "Failed"
+            echo "--- Virgl Server Start Log ---"
+            echo "$virgl_out"
+            echo "------------------------------"
+        fi
+    fi
+
+    # Determine chroot Desktop command
+    case "${DESKTOP:-}" in
+        lxde) desktop_cmd='exec dbus-launch --exit-with-session startlxde' ;;
+        mate) desktop_cmd='exec dbus-launch --exit-with-session mate-session' ;;
+        xfce) desktop_cmd='exec dbus-launch --exit-with-session startxfce4' ;;
+        kde) desktop_cmd='exec dbus-launch --exit-with-session startplasma-x11' ;;
+        xterm) desktop_cmd='exec /usr/bin/xterm' ;;
+        *) desktop_cmd='exec dbus-launch --exit-with-session startxfce4' ;;
+    esac
+
+    # Graphical Orchestration Matrix
+    local hw_vars=""
+    if echo " $INCLUDE " | grep -q " hardware/virgl "; then
+        hw_vars="'export GALLIUM_DRIVER=virpipe' 'export MESA_GL_VERSION_OVERRIDE=4.0' 'export MESA_GLES_VERSION_OVERRIDE=3.1'"
+    fi
+
+    if [ "$HAS_X11" = "true" ] && [ "$HAS_VNC" = "false" ]; then
+        printf "Starting Native X11 Session... "
+        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=tcp:127.0.0.1:4713' 'export DISPLAY=:0' $hw_vars '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+            echo "Success"
+        else
+            echo "Failed"
+            cat "$chroot_distro_path/log/chd_startup.log"
+        fi
+    elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "false" ]; then
+        printf "Starting VNC (Xvnc)... "
+        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); vnc_home=\"\$user_home/.vnc\"; mkdir -p \"\$vnc_home\"; printf '%s\n' '#!/bin/sh' 'export XKL_XMODMAP_DISABLE=1' 'export PULSE_SERVER=tcp:127.0.0.1:4713' 'export DISPLAY=:$VNC_DISPLAY' '$desktop_cmd' > \"\$vnc_home/xstartup\"; chmod +x \"\$vnc_home/xstartup\"; chown -R \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$vnc_home\"; su - \"$USER_NAME\" -c 'vncserver :$VNC_DISPLAY -geometry ${VNC_WIDTH}x${VNC_HEIGHT} -depth ${VNC_DEPTH} -localhost no &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+            echo "Success"
+        else
+            echo "Failed"
+            cat "$chroot_distro_path/log/chd_startup.log"
+        fi
+    elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "true" ]; then
+        printf "Starting Native X11 Session... "
+        if chroot "$distro_path" /bin/sh -lc "user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=tcp:127.0.0.1:4713' 'export DISPLAY=:0' 'export GALLIUM_DRIVER=virgl' '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+            echo "Success"
+        else
+            echo "Failed"
+            cat "$chroot_distro_path/log/chd_startup.log"
+        fi
+        
+        printf "Starting x11vnc Mirror on :0... "
+        if chroot "$distro_path" /bin/sh -lc "su - \"$USER_NAME\" -c 'nohup x11vnc -display :0 -bg -nopw -listen 0.0.0.0 -xkb -ncache 10 -shared -forever > \$HOME/x11vnc_mirror.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+            echo "Success"
+        else
+            echo "Failed"
+            cat "$chroot_distro_path/log/chd_startup.log"
+        fi
     fi
 
     return 0
@@ -2323,6 +2460,12 @@ chroot_distro_install() {
         print_message info "Rootfs unpacked to: $distro_path"
     fi
 
+    mkdir -p "$distro_path/root/.chd-init"
+    echo "[Success] Install: Rootfs Download and Extract" > "$chroot_distro_path/log/chd_init_summary.log"
+    if [ -n "$chroot_distro_image_file" ]; then
+        echo "[Success] Install: Create and Mount Image ($chroot_distro_image_file)" >> "$chroot_distro_path/log/chd_init_summary.log"
+    fi
+
     chroot_distro_mount_system_points "$distro_path" 
     print_message info "System mount points ready"
     prepare_chroot_distro "$distro_path" 
@@ -2346,6 +2489,7 @@ chroot_distro_install() {
             else
                 print_message warning "Init did not complete cleanly"
             fi
+            if [ -f "$distro_path/tmp/chd_init_summary.log" ]; then cp "$distro_path/tmp/chd_init_summary.log" "$chroot_distro_path/log/chd_init_summary.log"; rm -f "$distro_path/tmp/chd_init_summary.log"; fi
         else
             print_message warning "Init skipped: no config available for ${distro}"
         fi
@@ -2396,6 +2540,7 @@ Please note, that using --force option may close more programs than intended, so
 }
 
 chroot_distro_uninstall() {
+    mkdir -p "$chroot_distro_path/log"
     chroot_distro_resolve_instance "$1"
     if [ -n "${INSTANCE_CONF:-}" ]; then
         chroot_distro_check_if_supported "$INSTANCE_DISTRO"
@@ -2407,13 +2552,23 @@ chroot_distro_uninstall() {
     include_profile=$4
 
     if [ -d "$distro_path" ]; then
-        print_message info "[uninstall] Starting uninstall for $INSTANCE_NAME..."
         if [ "yes" = "$force" ]; then
-            print_message info "[uninstall] Force flag used, forcing unmount under $distro_path/..."
-            chroot_distro_force_unmount "$distro_path/" 
+            printf "[Clean] Force Process Kill.. "
+            if chroot_distro_force_unmount "$distro_path/" >""$chroot_distro_path/log/chd_uninstall.log 2>&1; then
+                echo "Success."
+            else
+                echo "Failed."
+                cat ""$chroot_distro_path/log/chd_uninstall.log
+            fi
         fi
-        print_message info "[uninstall] Unmounting system points..."
-        chroot_distro_unmount_system_points "$distro_path" no
+        printf "[Clean] Unmount System Points.. "
+        if chroot_distro_unmount_system_points "$distro_path" "no" >""$chroot_distro_path/log/chd_uninstall.log 2>&1; then
+            echo "Success."
+        else
+            echo "Failed."
+            cat ""$chroot_distro_path/log/chd_uninstall.log
+            return 1
+        fi
         
         print_message info "[uninstall] Checking for remaining mounts, loopbacks, and open files..."
         mounts=$(cat /proc/mounts | grep -F "$distro_path" || true)
@@ -3055,7 +3210,7 @@ elif [ "$command" = "install" ]; then
         chroot_distro_user_check_parameters
     fi
     chroot_distro_warn_if_unsupported_busybox
-    chroot_distro_install "$1" "$no_init" "$no_img"
+    ( chroot_distro_install "$1" "$no_init" "$no_img" 2>&1 ) | tee "$chroot_distro_path/log/chd_install.log"
 elif [ "$command" = "uninstall" ]; then
     PARSED=$(getopt --options=f --longoptions=force,include-profile --name "$0" -- "$@") || chroot_distro_exit 2
     eval set -- "$PARSED"
