@@ -144,6 +144,7 @@ printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
 getent group aid_inet >/dev/null 2>&1 || groupadd -g 3003 aid_inet
 getent group aid_net_raw >/dev/null 2>&1 || groupadd -g 3004 aid_net_raw
 getent group aid_graphics >/dev/null 2>&1 || groupadd -g 1003 aid_graphics
+getent group aid_drmrpc >/dev/null 2>&1 || groupadd -g 1026 aid_drmrpc
 usermod -g 3003 -G 3003,3004 -a _apt
 usermod -G 3003 -a root
 log_result Success "Init: Network + Android group mappings"
@@ -153,6 +154,7 @@ run apt update
 run apt upgrade -y
 run apt install -y coreutils passwd adduser libc-bin
 run apt install -y vim net-tools sudo git dbus-x11 mesa-utils pulseaudio-utils alsa-utils
+run apt install -y mesa-vulkan-drivers vulkan-tools libegl1 libgl1-mesa-dri
 log_result Success "Init: apt update/upgrade + base tools"
 
 log "=== Init: Timezone configuration ==="
@@ -188,7 +190,7 @@ fi
 if ! id "${CHROOT_USER}" >/dev/null 2>&1; then
   log "Creating user with adduser (Ubuntu default behavior)"
   run adduser --disabled-password --gecos "" "${CHROOT_USER}"
-  run usermod -aG sudo,audio,video,storage,aid_inet "${CHROOT_USER}"
+  run usermod -aG sudo,audio,video,storage,aid_inet,aid_graphics,aid_drmrpc "${CHROOT_USER}"
 else
   log "User ${CHROOT_USER} already exists"
 fi
@@ -303,21 +305,45 @@ case "${CHROOT_DESKTOP}" in
     echo 'exec dbus-launch --exit-with-session xfce4-session' > "/home/${CHROOT_USER}/.xsession"
     user_group="$(id -gn "${CHROOT_USER}")"
     run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
-    # Disable compositor for Virgl compliance (Termux-Desktops HardwareAcceleration.md line 349)
-    if echo " $INCLUDE " | grep -q " hardware/virgl "; then
-      log "Disabling Xfce compositor for GPU acceleration"
-      run su - "${CHROOT_USER}" -c "xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false" || true
-    fi
+    
+    # XFCE Optimizations for Mobile/Chroot stability
+    log "Applying XFCE stability tweaks for ${CHROOT_USER}"
+    # 1. Disable compositor (Crucial for hardware acceleration compatibility)
+    run su - "${CHROOT_USER}" -c "xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false" || true
+    # 2. Disable power management (Prevents hang/black screen on idle)
+    run su - "${CHROOT_USER}" -c "xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/lock-screen-suspend-hibernate -n -t bool -s false" || true
+    # 3. Disable screensaver (Prevents locking issues)
+    run su - "${CHROOT_USER}" -c "xfconf-query -c xfce4-screensaver -p /saver/enabled -n -t bool -s false" || true
+    ;;
+  lxqt)
+    log "Desktop: lxqt"
+    run apt install -y lxqt qterminal pcmanfm-qt featherpad
+    log "CMD: write /home/${CHROOT_USER}/.xsession"
+    echo 'exec dbus-launch --exit-with-session startlxqt' > "/home/${CHROOT_USER}/.xsession"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
+    ;;
+  gnome)
+    log "Desktop: gnome"
+    run apt install -y dbus-x11 gnome-session gnome-terminal gnome-control-center
+    log "CMD: write /home/${CHROOT_USER}/.xsession"
+    echo 'exec dbus-launch --exit-with-session gnome-session' > "/home/${CHROOT_USER}/.xsession"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
     ;;
   kde)
     log "Desktop: kde"
-    run apt install -y kubuntu-desktop
+    run apt install -y plasma-desktop konsole dolphin dbus-x11
+    log "CMD: write /home/${CHROOT_USER}/.xsession"
+    echo 'exec dbus-launch --exit-with-session startplasma-x11' > "/home/${CHROOT_USER}/.xsession"
+    user_group="$(id -gn "${CHROOT_USER}")"
+    run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
     ;;
   none)
     log "Desktop: none"
     ;;
   *)
-    log "ERROR: Unknown CHROOT_DESKTOP='${CHROOT_DESKTOP}'. Use lxde, xfce, mate, xterm, kde, or none."
+    log "ERROR: Unknown CHROOT_DESKTOP='${CHROOT_DESKTOP}'. Use lxde, xfce, mate, xterm, gnome, kde, lxqt, or none."
     exit 1
     ;;
  esac
@@ -368,10 +394,22 @@ log_result Success "Init: Disable snapd"
 
 # Step 15: Global environment configuration (PULSE_SERVER, DISPLAY)
 log "=== Init: Environment Orchestration ==="
+# DISPLAY 값을 INCLUDE에서 판별:
+#   graphics/x11 → :0 (Termux:X11 소켓)
+#   graphics/vnc → :${VNC_DISPLAY:-1} (독립 VNC 서버)
+#   미지정       → :0 (X11을 기본으로 가정)
+if has_include "graphics/x11"; then
+  RESOLVED_DISPLAY=":0"
+elif has_include "graphics/vnc"; then
+  RESOLVED_DISPLAY=":${CHROOT_VNC_DISPLAY:-1}"
+else
+  RESOLVED_DISPLAY=":0"
+fi
+log "Resolved DISPLAY=${RESOLVED_DISPLAY}"
 cat <<EOF > "/etc/profile.d/chd_env.sh"
 #!/bin/sh
 export PULSE_SERVER=tcp:\${PULSE_HOST:-127.0.0.1}:\${PULSE_PORT:-$CHROOT_PULSE_PORT}
-export DISPLAY=:\${VNC_DISPLAY:-\${CHROOT_VNC_DISPLAY:-1}}
+export DISPLAY=$RESOLVED_DISPLAY
 EOF
 chmod 644 "/etc/profile.d/chd_env.sh"
 log_result Success "Init: Environment orchestration variables"
