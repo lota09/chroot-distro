@@ -2097,7 +2097,8 @@ chroot_distro_start_runtime_services() {
         if [ ! -e "$distro_path/tmp/.virgl_test" ] || ! mountpoint -q "$distro_path/tmp/.virgl_test"; then
             touch "$distro_path/tmp/.virgl_test"
             mount --bind "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" >/dev/null 2>&1 || true
-            chmod 666 "$distro_path/tmp/.virgl_test" 2>/dev/null || true
+            # Force permissions inside chroot to ensure guest users can write to the socket
+            chroot "$distro_path" /bin/sh -c "chmod 666 /tmp/.virgl_test" >/dev/null 2>&1 || true
         fi
         chroot_distro_start_host_virgl() { host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" >> "$host_log" 2>&1; }
         if chroot_distro_start_host_virgl; then
@@ -2130,7 +2131,23 @@ chroot_distro_start_runtime_services() {
 
     if [ "$HAS_X11" = "true" ] && [ "$HAS_VNC" = "false" ]; then
         printf "Starting Native X11 Session... "
-        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=$pulse_server' 'export DISPLAY=:$X11_DISPLAY' $hw_vars '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+        # Generate internal startup script to avoid escaping hell
+        cat <<EOF | chroot "$distro_path" /bin/sh -c "cat > /tmp/.chd_x11_start.sh"
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+USER_HOME=\$(getent passwd "$USER_NAME" | cut -d: -f6 2>/dev/null || echo /root)
+cat <<XEOF > "\$USER_HOME/.xstartup_native"
+#!/bin/sh
+export PULSE_SERVER=$pulse_server
+export DISPLAY=:$X11_DISPLAY
+$hw_vars
+$desktop_cmd
+XEOF
+chmod +x "\$USER_HOME/.xstartup_native"
+chown "$USER_NAME":\$(id -gn "$USER_NAME" 2>/dev/null || echo "$USER_NAME") "\$USER_HOME/.xstartup_native"
+su - "$USER_NAME" -c "nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &"
+EOF
+        if chroot "$distro_path" /bin/sh /tmp/.chd_x11_start.sh >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
@@ -2138,7 +2155,27 @@ chroot_distro_start_runtime_services() {
         fi
     elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "false" ]; then
         printf "Starting VNC (Xvnc)... "
-        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; vnc_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); mkdir -p \"\$vnc_home/.vnc\"; printf '%s\n' '#!/bin/sh' 'export XKL_XMODMAP_DISABLE=1' 'export PULSE_SERVER=$pulse_server' 'export DISPLAY=:$VNC_DISPLAY' $hw_vars '$desktop_cmd' > \"\$vnc_home/.vnc/xstartup\"; chmod +x \"\$vnc_home/.vnc/xstartup\"; chown -R \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$vnc_home/.vnc\"; su - \"$USER_NAME\" -c 'vncserver -kill :$VNC_DISPLAY >/dev/null 2>&1; vncserver :$VNC_DISPLAY -geometry ${VNC_WIDTH}x${VNC_HEIGHT} -depth ${VNC_DEPTH} -dpi ${VNC_DPI} $VNC_ARGS'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+        # Generate internal startup script to avoid escaping hell and implement split acceleration
+        cat <<EOF | chroot "$distro_path" /bin/sh -c "cat > /tmp/.chd_vnc_start.sh"
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+USER_HOME=\$(getent passwd "$USER_NAME" | cut -d: -f6 2>/dev/null || echo /root)
+mkdir -p "\$USER_HOME/.vnc"
+cat <<XEOF > "\$USER_HOME/.vnc/xstartup"
+#!/bin/sh
+export XKL_XMODMAP_DISABLE=1
+export PULSE_SERVER=$pulse_server
+export DISPLAY=:$VNC_DISPLAY
+$hw_vars
+$desktop_cmd
+XEOF
+chmod +x "\$USER_HOME/.vnc/xstartup"
+chown -R "$USER_NAME":\$(id -gn "$USER_NAME" 2>/dev/null || echo "$USER_NAME") "\$USER_HOME/.vnc"
+# Stability Fix: Run the VNC server itself with softpipe (no hardware acceleration for management process)
+# While using the full hw_vars (virpipe) inside the xstartup for apps.
+su "$USER_NAME" -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export GALLIUM_DRIVER=softpipe; vncserver -kill :$VNC_DISPLAY >/dev/null 2>&1; vncserver :$VNC_DISPLAY -geometry ${VNC_WIDTH}x${VNC_HEIGHT} -depth ${VNC_DEPTH} -dpi ${VNC_DPI} $VNC_ARGS"
+EOF
+        if chroot "$distro_path" /bin/sh /tmp/.chd_vnc_start.sh >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
@@ -2146,7 +2183,22 @@ chroot_distro_start_runtime_services() {
         fi
     elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "true" ]; then
         printf "Starting Native X11 Session... "
-        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=$pulse_server' 'export DISPLAY=:0' $hw_vars '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+        cat <<EOF | chroot "$distro_path" /bin/sh -c "cat > /tmp/.chd_x11_start.sh"
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+USER_HOME=\$(getent passwd "$USER_NAME" | cut -d: -f6 2>/dev/null || echo /root)
+cat <<XEOF > "\$USER_HOME/.xstartup_native"
+#!/bin/sh
+export PULSE_SERVER=$pulse_server
+export DISPLAY=:0
+$hw_vars
+$desktop_cmd
+XEOF
+chmod +x "\$USER_HOME/.xstartup_native"
+chown "$USER_NAME":\$(id -gn "$USER_NAME" 2>/dev/null || echo "$USER_NAME") "\$USER_HOME/.xstartup_native"
+su - "$USER_NAME" -c "nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &"
+EOF
+        if chroot "$distro_path" /bin/sh /tmp/.chd_x11_start.sh >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
