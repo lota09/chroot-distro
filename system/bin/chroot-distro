@@ -1,4 +1,4 @@
-#!/system/bin/sh
+﻿#!/system/bin/sh
 #
 # Copyright 2025 Yasser Null
 #
@@ -1112,7 +1112,7 @@ chroot_distro_profile() {
         esac
     done
 
-    # Desktop Environment (데스크탑 환경 선택)
+    # Desktop Environment (?곗뒪?ы깙 ?섍꼍 ?좏깮)
     if [ "$GRAPHICS" != "none" ]; then
         print_message note ""
         print_message note "[ Desktop Environment ]"
@@ -1385,23 +1385,23 @@ chroot_distro_list() {
             if [ "yes" = "$installed_distros" ] && [ -z "$installed" ]; then
                     continue
             fi
-            print_message info "├── $d"
+            print_message info "?쒋?? $d"
             if [ -n "$downloads" ]; then
-                    print_message info "│   ├── Downloaded"
+                    print_message info "??  ?쒋?? Downloaded"
                     for suite in $downloads; do
-                            print_message info "│   │   ├── $suite"
+                            print_message info "??  ??  ?쒋?? $suite"
                     done
             fi
             if [ -n "$installed" ]; then
-                    print_message info "│   ├── Installed"
+                    print_message info "??  ?쒋?? Installed"
                     for instance in $installed; do
-                            print_message info "│   │   ├── $instance"
+                            print_message info "??  ??  ?쒋?? $instance"
                     done
             fi
             if [ -n "$backups" ]; then
-                    print_message info "│   ├── Backup"
+                    print_message info "??  ?쒋?? Backup"
                     for instance in $backups; do
-                            print_message info "│   │   ├── $instance"
+                            print_message info "??  ??  ?쒋?? $instance"
                     done
             fi
     done
@@ -1587,7 +1587,7 @@ chroot_distro_download() {
             version="$(wget -qO- "${chimera_rootfs_base_url}" | grep -oE "chimera-linux-$(echo "${architecture}" | sed s/arm64/aarch64/ | sed s/amd64/x86_64/)-ROOTFS-[0-9]{8}-${rootfs}\.tar.gz" | sed -E "s/.*ROOTFS-([0-9]{8})-${rootfs}\.tar\.gz/\1/" | head -n 1)"
             download_url="${chimera_rootfs_base_url}/${version}"
         elif [ "$distro" = "adelie" ]; then
-            distro_name='Adélie Linux'
+            distro_name='Ad챕lie Linux'
             if [ -n "$download_suite" ]; then
                 rootfs="$download_suite"
             else
@@ -1993,7 +1993,7 @@ chroot_distro_start_runtime_services() {
             fi
         else
             echo "Failed (Termux:X11 socket not found at $TERMUX_TMP/.X11-unix/X${X11_DISPLAY:-0})"
-            echo "  → Please open the Termux:X11 app manually, then run: chd login --overwrite-startup ${instance_name}"
+            echo "  ??Please open the Termux:X11 app manually, then run: chd login --overwrite-startup ${instance_name}"
             cat "$host_log"
         fi
     fi
@@ -2056,7 +2056,7 @@ chroot_distro_start_runtime_services() {
     local hw_vars=""
     if echo " $INCLUDE " | grep -q " hardware/virgl "; then
         # Unified High-Performance GPU Settings (from Native Termux scripts)
-        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=zink; export MESA_GL_VERSION_OVERRIDE=4.6; export MESA_GLES_VERSION_OVERRIDE=3.2; export TU_DEBUG=noconform; export MESA_VK_WSI_PRESENT_MODE=immediate; export ZINK_DESCRIPTORS=lazy; export MESA_LOADER_DRIVER_OVERRIDE=zink"
+        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=virpipe; export MESA_GL_VERSION_OVERRIDE=4.3; export MESA_GLES_VERSION_OVERRIDE=3.2"
         
         # Ensure correct DRM and GPU access for the chroot by fixing host /dev/dri permissions
         if [ -d "${distro_path}/dev/dri" ]; then
@@ -2272,13 +2272,13 @@ chroot_distro_jail() {
 export DISPLAY=$TARGET_DISPLAY
 export PULSE_SERVER=tcp:127.0.0.1:4713
 export MESA_NO_ERROR=1
-export GALLIUM_DRIVER=zink
-export MESA_GL_VERSION_OVERRIDE=4.6
+export GALLIUM_DRIVER=virpipe
+export MESA_GL_VERSION_OVERRIDE=4.3
 export MESA_GLES_VERSION_OVERRIDE=3.2
 export TU_DEBUG=noconform
 export MESA_VK_WSI_PRESENT_MODE=immediate
 export ZINK_DESCRIPTORS=lazy
-export MESA_LOADER_DRIVER_OVERRIDE=zink
+export MESA_LOADER_DRIVER_OVERRIDE=virpipe
 EOF
             chmod 644 "$distro_path/etc/profile.d/chd.sh"
 
@@ -2334,13 +2334,13 @@ EOF
 export DISPLAY=$TARGET_DISPLAY
 export PULSE_SERVER=tcp:127.0.0.1:4713
 export MESA_NO_ERROR=1
-export GALLIUM_DRIVER=zink
-export MESA_GL_VERSION_OVERRIDE=4.6
+export GALLIUM_DRIVER=virpipe
+export MESA_GL_VERSION_OVERRIDE=4.3
 export MESA_GLES_VERSION_OVERRIDE=3.2
 export TU_DEBUG=noconform
 export MESA_VK_WSI_PRESENT_MODE=immediate
 export ZINK_DESCRIPTORS=lazy
-export MESA_LOADER_DRIVER_OVERRIDE=zink
+export MESA_LOADER_DRIVER_OVERRIDE=virpipe
 EOF
         chmod 644 "$distro_path/etc/profile.d/chd.sh"
 

@@ -65,15 +65,19 @@ XEOF
     # Optional: x11vnc Mirroring if VNC requested
     # We always mirror :0 on the host
     if [ "$HAS_VNC" = "true" ]; then
+        # Wait for the display to be ready
+        i=0
+        while [ ! -S /tmp/.X11-unix/X0 ] && [ "$i" -lt 10 ]; do
+             sleep 1
+             i=$((i + 1))
+        done
         # Start mirroring session in background
-        # || true: x11vnc 실패가 set -e 로 인해 스크립트를 종료하지 않도록 보호
-        su - "$USER_NAME" -c "nohup x11vnc -display :0 -bg -nopw -listen 0.0.0.0 -xkb -ncache 10 -shared -forever > \$HOME/x11vnc_mirror.log 2>&1 &" \
+        su - "$USER_NAME" -c "nohup x11vnc -display :0 -bg -nopw -listen 0.0.0.0 -xkb -ncache 10 -shared -forever > \"\$HOME/x11vnc_mirror.log\" 2>&1 &" \
             || echo "[warn] x11vnc failed to start (non-fatal)"
     fi
     
     # Start the Native X11 session in background
-    # || true: DE 세션 시작 실패가 set -e 로 인해 스크립트를 종료하지 않도록 보호
-    su - "$USER_NAME" -c "nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &" \
+    su - "$USER_NAME" -c "nohup \$HOME/.xstartup_native > \"\$HOME/x11_native.log\" 2>&1 &" \
         || echo "[warn] .xstartup_native failed to start (non-fatal)"
 fi
 
