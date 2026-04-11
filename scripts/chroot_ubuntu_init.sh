@@ -89,14 +89,14 @@ CHROOT_SSH="${CHROOT_SSH:-${SSH_ENABLE:-true}}"
 CHROOT_PULSE="${CHROOT_PULSE:-${PULSE_ENABLE:-true}}"
 CHROOT_VNC="${CHROOT_VNC:-${VNC_ENABLE:-false}}"
 CHROOT_VNC_PASS="${CHROOT_VNC_PASS:-${VNC_PASSWORD:-${CHROOT_PASS:-changeme}}}"
-CHROOT_VNC_DISPLAY="${CHROOT_VNC_DISPLAY:-${VNC_DISPLAY:-0}}"
+CHROOT_VNC_DISPLAY="${CHROOT_VNC_DISPLAY:-${VNC_DISPLAY:-1}}"
 CHROOT_VNC_DEPTH="${CHROOT_VNC_DEPTH:-${VNC_DEPTH:-16}}"
 CHROOT_VNC_DPI="${CHROOT_VNC_DPI:-${VNC_DPI:-75}}"
 CHROOT_VNC_WIDTH="${CHROOT_VNC_WIDTH:-${VNC_WIDTH:-800}}"
 CHROOT_VNC_HEIGHT="${CHROOT_VNC_HEIGHT:-${VNC_HEIGHT:-480}}"
 CHROOT_X11="${CHROOT_X11:-${X11_ENABLE:-false}}"
 CHROOT_PULSE_HOST="${CHROOT_PULSE_HOST:-${PULSE_HOST:-127.0.0.1}}"
-CHROOT_PULSE_PORT="${CHROOT_PULSE_PORT:-${PULSE_PORT:-4712}}"
+CHROOT_PULSE_PORT="${CHROOT_PULSE_PORT:-${PULSE_PORT:-4713}}"
 CHROOT_SSH_PORT="${CHROOT_SSH_PORT:-${SSH_PORT:-22}}"
 CHROOT_SSH_ARGS="${CHROOT_SSH_ARGS:-${SSH_ARGS:-}}"
 
@@ -133,7 +133,7 @@ fi
 log "=== Init: Network + Android group mappings ==="
 # Step 7: basic network + Android group mappings
 log "CMD: write /etc/resolv.conf"
-printf "nameserver 8.8.8.8\n" > /etc/resolv.conf
+printf "nameserver %s\n" "${DNS:-8.8.8.8}" > /etc/resolv.conf
 log "CMD: write /etc/hosts"
 printf "127.0.0.1 localhost\n::1 localhost\n" > /etc/hosts
 
@@ -234,7 +234,7 @@ if [ "${CHROOT_PULSE}" = "true" ]; then
   if [ -d /etc/profile.d ]; then
 # Install base tools early so `groupadd`/`usermod` exist before use.
     log "CMD: write /etc/profile.d/pulse.sh"
-    printf "PULSE_SERVER=%s:%s\nexport PULSE_SERVER\n" "${CHROOT_PULSE_HOST}" "${CHROOT_PULSE_PORT}" > /etc/profile.d/pulse.sh
+    printf "PULSE_SERVER=tcp:%s:%s\nexport PULSE_SERVER\n" "${CHROOT_PULSE_HOST}" "${CHROOT_PULSE_PORT}" > /etc/profile.d/pulse.sh
   fi
   log "CMD: write /etc/asound.conf"
   {
@@ -303,6 +303,11 @@ case "${CHROOT_DESKTOP}" in
     echo 'exec dbus-launch --exit-with-session xfce4-session' > "/home/${CHROOT_USER}/.xsession"
     user_group="$(id -gn "${CHROOT_USER}")"
     run chown "${CHROOT_USER}:${user_group}" "/home/${CHROOT_USER}/.xsession"
+    # Disable compositor for Virgl compliance (Termux-Desktops HardwareAcceleration.md line 349)
+    if echo " $INCLUDE " | grep -q " hardware/virgl "; then
+      log "Disabling Xfce compositor for GPU acceleration"
+      run su - "${CHROOT_USER}" -c "xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false" || true
+    fi
     ;;
   kde)
     log "Desktop: kde"
@@ -365,8 +370,8 @@ log_result Success "Init: Disable snapd"
 log "=== Init: Environment Orchestration ==="
 cat <<EOF > "/etc/profile.d/chd_env.sh"
 #!/bin/sh
-export PULSE_SERVER=tcp:127.0.0.1:4713
-export DISPLAY=:0
+export PULSE_SERVER=tcp:\${PULSE_HOST:-127.0.0.1}:\${PULSE_PORT:-$CHROOT_PULSE_PORT}
+export DISPLAY=:\${VNC_DISPLAY:-\${CHROOT_VNC_DISPLAY:-1}}
 EOF
 chmod 644 "/etc/profile.d/chd_env.sh"
 log_result Success "Init: Environment orchestration variables"
@@ -380,9 +385,4 @@ Install Result Summary
 $(cat /tmp/chd_init_summary.log 2>/dev/null || echo "No results recorded")
 ----------------------------------------
 
-Next steps (run from host):
-- Start the desktop with chroot-distro command, for example:
-  chroot-distro command ubuntu "su - ${CHROOT_USER} -c 'export DISPLAY=:0 PULSE_SERVER=tcp:127.0.0.1:4713 ; dbus-launch --exit-with-session startxfce4'"
-
-If you want KDE, replace startxfce4 with startplasma-x11.
 EOF

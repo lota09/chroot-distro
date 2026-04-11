@@ -7,14 +7,13 @@ LOGFILE="$TMPDIR/chd_host_x11.log"
 echo "--- Termux:X11 Host Check ---" | tee -a "$LOGFILE"
 date | tee -a "$LOGFILE"
 
-SOCKET_PATH="$TMPDIR/.X11-unix/X0"
+SOCKET_PATH="$TMPDIR/.X11-unix/X${X11_DISPLAY:-0}"
 
 if [ -S "$SOCKET_PATH" ]; then
     echo "Termux:X11 socket found at $SOCKET_PATH" | tee -a "$LOGFILE"
     exit 0
 else
-    echo "WARNING: Termux:X11 socket NOT found at $SOCKET_PATH" | tee -a "$LOGFILE"
+    echo "ERROR: Termux:X11 socket NOT found at $SOCKET_PATH" | tee -a "$LOGFILE"
     echo "Please ensure the Termux:X11 Android app is running if you want accelerated display!" | tee -a "$LOGFILE"
-    # We still exit 0 to not break the boot chain, it just warns the user in logs
-    exit 0
+    exit 1
 fi

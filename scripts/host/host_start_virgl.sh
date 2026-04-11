@@ -6,7 +6,7 @@ LOGFILE="$TMPDIR/chd_host_virgl.log"
 > "$LOGFILE"
 
 # Check if already running
-if pgrep -f "virgl_test_server" > /dev/null; then
+if pgrep -x "virgl_test_server" > /dev/null; then
     exit 0
 fi
 
@@ -26,7 +26,7 @@ fi
 MESA_NO_ERROR=1 MESA_GL_VERSION_OVERRIDE=4.3COMPAT MESA_GLES_VERSION_OVERRIDE=3.2 GALLIUM_DRIVER=zink ZINK_DESCRIPTORS=lazy virgl_test_server --use-egl-surfaceless --use-gles > "$TMPDIR/virgl_output.log" 2>&1 &
 
 sleep 1
-if pgrep -f "virgl_test_server" > /dev/null; then
+if pgrep -x "virgl_test_server" > /dev/null; then
     exit 0
 else
     echo "Failed to start virgl_test_server!"

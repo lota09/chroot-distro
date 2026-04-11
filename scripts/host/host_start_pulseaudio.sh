@@ -4,7 +4,7 @@ LOGFILE="$TMPDIR/chd_host_pulse.log"
 # Clear log for new run
 > "$LOGFILE"
 
-if pgrep -f "pulseaudio" > /dev/null; then
+if ss -tlpn | grep -q ":${PULSE_PORT:-4713} "; then
     exit 0
 fi
 
@@ -19,11 +19,11 @@ if ! command -v pulseaudio >/dev/null 2>&1; then
     echo "Installation complete."
 fi
 
-# Start the pulse daemon with TCP native protocol listening on localhost
-pulseaudio --start --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" --exit-idle-time=-1 > "$TMPDIR/pulse_output.log" 2>&1
+# Start the pulse daemon with TCP native protocol (using specified port or default 4713)
+pulseaudio --start --load="module-native-protocol-tcp auth-anonymous=1 port=${PULSE_PORT:-4713}" --exit-idle-time=-1 > "$TMPDIR/pulse_output.log" 2>&1
 
 sleep 1
-if pgrep -f "pulseaudio" > /dev/null; then
+if ss -tlpn | grep -q ":${PULSE_PORT:-4713} "; then
     exit 0
 else
     echo "Failed to start pulseaudio!"

@@ -1045,6 +1045,16 @@ chroot_distro_init_run() {
 
     print_message info "Running init inside chroot: $script_name"
     chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; /bin/sh /root/.chd-init/$script_name --conf /root/.chd-init/profile.conf"
+
+    # User Custom Setup Hook (repurposed INIT_PATH)
+    # shellcheck disable=SC1090
+    . "$conf_file"
+    if [ -n "${INIT_PATH:-}" ] && [ -f "$INIT_PATH" ]; then
+        print_message info "Running custom setup script: $INIT_PATH"
+        cp "$INIT_PATH" "$chroot_init_dir/custom_init.sh"
+        chmod 700 "$chroot_init_dir/custom_init.sh"
+        chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; /bin/sh /root/.chd-init/custom_init.sh"
+    fi
 }
 
 chroot_distro_profile() {
@@ -1102,18 +1112,15 @@ chroot_distro_profile() {
     USER_NAME_DEFAULT="${USER_NAME:-user}"
     USER_PASSWORD_DEFAULT="${USER_PASSWORD:-changeme}"
     SSH_PORT_DEFAULT="${SSH_PORT:-22}"
-    VNC_DISPLAY_DEFAULT="${VNC_DISPLAY:-0}"
+    VNC_DISPLAY_DEFAULT="${VNC_DISPLAY:-1}"
     VNC_WIDTH_DEFAULT="${VNC_WIDTH:-1920}"
     VNC_HEIGHT_DEFAULT="${VNC_HEIGHT:-1080}"
     VNC_DEPTH_DEFAULT="${VNC_DEPTH:-16}"
     VNC_DPI_DEFAULT="${VNC_DPI:-75}"
-    X11_HOST_DEFAULT="${X11_HOST:-127.0.0.1}"
     X11_DISPLAY_DEFAULT="${X11_DISPLAY:-0}"
-    X11_SDL_DEFAULT="${X11_SDL:-false}"
-    X11_SDL_DELAY_DEFAULT="${X11_SDL_DELAY:-15}"
     LOCALE_DEFAULT="${LOCALE:-en_US.UTF-8}"
     PULSE_HOST_DEFAULT="${PULSE_HOST:-127.0.0.1}"
-    PULSE_PORT_DEFAULT="${PULSE_PORT:-4712}"
+    PULSE_PORT_DEFAULT="${PULSE_PORT:-4713}"
     SOURCE_PATH_DEFAULT="${SOURCE_PATH:-http://ports.ubuntu.com/}"
     MOUNTS_DEFAULT="${MOUNTS:-/:/mnt/android}"
     INIT_DEFAULT="${INIT:-run-parts}"
@@ -1207,15 +1214,9 @@ chroot_distro_profile() {
 
     if [ "$GRAPHICS" = "x11" ] || [ "$GRAPHICS" = "vnc+x11" ]; then
         profile_log "[NOTICE] X11 Graphics requires the 'Termux:X11' Android app installed and running."
-        X11_HOST=$(profile_prompt_default "X11 host" "$X11_HOST_DEFAULT")
         X11_DISPLAY=$(profile_prompt_typed "X11 display" "$X11_DISPLAY_DEFAULT" uint)
-        X11_SDL=$(profile_prompt_yes_no "Enable X11 SDL" "$X11_SDL_DEFAULT")
-        X11_SDL_DELAY=$(profile_prompt_typed "X11 SDL delay" "$X11_SDL_DELAY_DEFAULT" uint)
     else
-        X11_HOST="$X11_HOST_DEFAULT"
         X11_DISPLAY="$X11_DISPLAY_DEFAULT"
-        X11_SDL="$X11_SDL_DEFAULT"
-        X11_SDL_DELAY="$X11_SDL_DELAY_DEFAULT"
     fi
 
     PULSE_ENABLE=$(profile_prompt_yes_no "Enable PulseAudio" "true")
@@ -1267,16 +1268,8 @@ DNS=""
 FS_TYPE="$FS_TYPE"
 GRAPHICS="$GRAPHICS"
 INCLUDE="$INCLUDE"
-INIT="$INIT_DEFAULT"
-INIT_ASYNC="$INIT_ASYNC_DEFAULT"
-INIT_LEVEL="$INIT_LEVEL_DEFAULT"
 INIT_PATH="$INIT_PATH_DEFAULT"
-INIT_USER="$INIT_USER_DEFAULT"
 LOCALE="$LOCALE"
-MOUNTS="$MOUNTS"
-NET_TRIGGER=""
-POWER_TRIGGER=""
-PULSE_HOST="$PULSE_HOST"
 PULSE_PORT="$PULSE_PORT"
 SOURCE_PATH="$SOURCE_PATH"
 SSH_ARGS="$SSH_ARGS"
@@ -1293,9 +1286,6 @@ VNC_DPI="$VNC_DPI"
 VNC_HEIGHT="$VNC_HEIGHT"
 VNC_WIDTH="$VNC_WIDTH"
 X11_DISPLAY="$X11_DISPLAY"
-X11_HOST="$X11_HOST"
-X11_SDL="$X11_SDL"
-X11_SDL_DELAY="$X11_SDL_DELAY"
 EOF
 
     profile_log "Profile saved: $profile_path"
@@ -1381,7 +1371,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-    3.1.1 (staging)
+    3.1.2 (staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -1853,17 +1843,26 @@ chroot_distro_mount_system_point() {
        if [ "${CHROOT_DISTRO_TMP:-}" = "false" ]; then
           return 
        fi
-       # Termux host tmp directory for socket sharing (X11, Virgl)
-       TERMUX_TMP="/data/data/com.termux/files/usr/tmp"
-       if [ -d "$TERMUX_TMP" ]; then
-           if mount --bind "$TERMUX_TMP" "$mount_point"; then
-               return
-           fi
+       # FBE-Resilient Bridge: Use private tmpfs to avoid encryption issues for Xvnc
+       # then surgically bind-mount ONLY the required hardware sockets
+       if mount -t tmpfs tmpfs "$mount_point"; then
+           TERMUX_TMP="/data/data/com.termux/files/usr/tmp"
+           if [ -d "$TERMUX_TMP" ]; then
+                # Surgical Bridge: Only mount hardware sockets if hardware/virgl or graphics is requested
+                # We use .virgl_test as verified in Termux binaries
+                if [ -e "$TERMUX_TMP/.virgl_test" ]; then
+                    touch "$mount_point/.virgl_test"
+                    mount --bind "$TERMUX_TMP/.virgl_test" "$mount_point/.virgl_test" >/dev/null 2>&1 || true
+                fi
+                if [ -d "$TERMUX_TMP/.X11-unix" ]; then
+                    mkdir -p "$mount_point/.X11-unix"
+                    mount --bind "$TERMUX_TMP/.X11-unix" "$mount_point/.X11-unix" >/dev/null 2>&1 || true
+                fi
+            fi
+           return
        fi
-       if ! mount -t tmpfs tmpfs "$mount_point"; then
-            print_message error "Failed to mount tmpfs on $mount_point"
-            chroot_distro_exit 1
-        fi
+       print_message error "Failed to mount tmpfs on $mount_point"
+       chroot_distro_exit 1
     elif [ "$path_to_mount" = "/run" ]; then 
        run_path=$(printf '%s\n' "$mount_point" | sed 's|^/var/run|/run|')
        if [ ! -e "$run_path" ]; then
@@ -2020,13 +2019,18 @@ chroot_distro_start_runtime_services() {
     : ${VNC_HEIGHT:=${VNC_HEIGHT:-480}}
     : ${VNC_DEPTH:=${VNC_DEPTH:-16}}
 
-    # Initialize composite log file
+    # Initialize log files
+    host_log="$chroot_distro_path/log/host_services.log"
+    > "$host_log"
     > "$chroot_distro_path/log/chd_startup.log"
+    
+    # Dynamic sync of chd_env.sh to ensure guest matches host profile and has a sane PATH
+    chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; printf '#!/bin/sh\nexport PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\nexport PULSE_SERVER=tcp:127.0.0.1:${PULSE_PORT:-4713}\nexport DISPLAY=:${VNC_DISPLAY:-1}\n' > /etc/profile.d/chd_env.sh; chmod 644 /etc/profile.d/chd_env.sh" >> "$host_log" 2>&1
 
     # Start SSH inside chroot (runs as root)
     if echo " $INCLUDE " | grep -q " extra/ssh "; then
         printf "Starting SSH... "
-        if chroot "$distro_path" /bin/sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; mkdir -p /run/sshd /var/run/sshd; if [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd; else printf "sshd missing\n" >&2; exit 2; fi' >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+        if chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; mkdir -p /run/sshd /var/run/sshd; if [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd $SSH_ARGS; else printf 'sshd missing\n' >&2; exit 2; fi" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
@@ -2037,13 +2041,14 @@ chroot_distro_start_runtime_services() {
     # Start PulseAudio on HOST TERMUX
     if echo " $INCLUDE " | grep -q " extra/pulse "; then
         printf "Starting Host PulseAudio... "
-        host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_pulseaudio.sh" > /data/local/tmp/chd_host_out 2>&1
+        # Pass the dynamic PULSE_PORT from profile to the host startup script
+        host_run_in_termux "PULSE_PORT=${PULSE_PORT:-4713} sh $chroot_distro_path/scripts/host/host_start_pulseaudio.sh" >> "$host_log" 2>&1
         if [ $? -eq 0 ]; then
             echo "Success"
         else
             echo "Failed"
             echo "--- PulseAudio Start Log ---"
-            cat /data/local/tmp/chd_host_out
+            cat "$host_log"
             echo "----------------------------"
         fi
     fi
@@ -2061,19 +2066,20 @@ chroot_distro_start_runtime_services() {
             return 1
         fi
         
+        HAS_X11="true"
         printf "Starting Host Termux:X11 bindings... "
-        mkdir -p /data/data/com.termux/files/usr/tmp/.X11-unix
-        mkdir -p "$distro_path/tmp/.X11-unix"
-        # Bind the Termux X socket directory into the chroot namespace so guest apps can talk to Termux:X11 natively
-        mount --bind /data/data/com.termux/files/usr/tmp/.X11-unix "$distro_path/tmp/.X11-unix" >/dev/null 2>&1 || true
-        
-        x11_out=$(host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_x11.sh" 2>&1)
-        if [ $? -eq 0 ]; then
+        # Ensure surgical mounts are applied even if services started late
+        if [ ! -d "$distro_path/tmp/.X11-unix" ] || ! mountpoint -q "$distro_path/tmp/.X11-unix"; then
+            mkdir -p "$distro_path/tmp/.X11-unix"
+            mountpoint -q "$TERMUX_TMP/.X11-unix" && mount --bind "$TERMUX_TMP/.X11-unix" "$distro_path/tmp/.X11-unix" >/dev/null 2>&1 || true
+        fi
+        chroot_distro_start_host_x11() { host_run_in_termux "X11_DISPLAY=$X11_DISPLAY sh $chroot_distro_path/scripts/host/host_start_x11.sh" >> "$host_log" 2>&1; }
+        if chroot_distro_start_host_x11; then
             echo "Success"
         else
             echo "Failed"
             echo "--- X11 Host Log ---"
-            echo "$x11_out"
+            cat "$host_log"
             echo "--------------------"
         fi
     fi
@@ -2087,13 +2093,19 @@ chroot_distro_start_runtime_services() {
         fi
         
         printf "Starting Host Virgl Server... "
-        host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" > /data/local/tmp/chd_host_out 2>&1
-        if [ $? -eq 0 ]; then
+        # Ensure surgical mounts are applied even if services started late
+        if [ ! -e "$distro_path/tmp/.virgl_test" ] || ! mountpoint -q "$distro_path/tmp/.virgl_test"; then
+            touch "$distro_path/tmp/.virgl_test"
+            mount --bind "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" >/dev/null 2>&1 || true
+            chmod 666 "$distro_path/tmp/.virgl_test" 2>/dev/null || true
+        fi
+        chroot_distro_start_host_virgl() { host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" >> "$host_log" 2>&1; }
+        if chroot_distro_start_host_virgl; then
             echo "Success"
         else
             echo "Failed"
             echo "--- Virgl Server Start Log ---"
-            cat /data/local/tmp/chd_host_out
+            cat "$host_log"
             echo "------------------------------"
         fi
     fi
@@ -2108,15 +2120,17 @@ chroot_distro_start_runtime_services() {
         *) desktop_cmd='exec dbus-launch --exit-with-session startxfce4' ;;
     esac
 
-    # Graphical Orchestration Matrix
+    local pulse_port="${PULSE_PORT:-4713}"
+    local pulse_server="tcp:127.0.0.1:$pulse_port"
     local hw_vars=""
     if echo " $INCLUDE " | grep -q " hardware/virgl "; then
+        # Following HardwareAcceleration.md: Use virpipe and MESA version overrides
         hw_vars="'export GALLIUM_DRIVER=virpipe' 'export MESA_GL_VERSION_OVERRIDE=4.0' 'export MESA_GLES_VERSION_OVERRIDE=3.1'"
     fi
 
     if [ "$HAS_X11" = "true" ] && [ "$HAS_VNC" = "false" ]; then
         printf "Starting Native X11 Session... "
-        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=tcp:127.0.0.1:4713' 'export DISPLAY=:0' $hw_vars '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=$pulse_server' 'export DISPLAY=:$X11_DISPLAY' $hw_vars '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
@@ -2124,7 +2138,7 @@ chroot_distro_start_runtime_services() {
         fi
     elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "false" ]; then
         printf "Starting VNC (Xvnc)... "
-        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); vnc_home=\"\$user_home/.vnc\"; mkdir -p \"\$vnc_home\"; printf '%s\n' '#!/bin/sh' 'export XKL_XMODMAP_DISABLE=1' 'export PULSE_SERVER=tcp:127.0.0.1:4713' 'export DISPLAY=:$VNC_DISPLAY' '$desktop_cmd' > \"\$vnc_home/xstartup\"; chmod +x \"\$vnc_home/xstartup\"; chown -R \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$vnc_home\"; su - \"$USER_NAME\" -c 'vncserver :$VNC_DISPLAY -geometry ${VNC_WIDTH}x${VNC_HEIGHT} -depth ${VNC_DEPTH} -localhost no &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; vnc_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); mkdir -p \"\$vnc_home/.vnc\"; printf '%s\n' '#!/bin/sh' 'export XKL_XMODMAP_DISABLE=1' 'export PULSE_SERVER=$pulse_server' 'export DISPLAY=:$VNC_DISPLAY' $hw_vars '$desktop_cmd' > \"\$vnc_home/.vnc/xstartup\"; chmod +x \"\$vnc_home/.vnc/xstartup\"; chown -R \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$vnc_home/.vnc\"; su - \"$USER_NAME\" -c 'vncserver -kill :$VNC_DISPLAY >/dev/null 2>&1; vncserver :$VNC_DISPLAY -geometry ${VNC_WIDTH}x${VNC_HEIGHT} -depth ${VNC_DEPTH} -dpi ${VNC_DPI} $VNC_ARGS'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
@@ -2132,7 +2146,7 @@ chroot_distro_start_runtime_services() {
         fi
     elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "true" ]; then
         printf "Starting Native X11 Session... "
-        if chroot "$distro_path" /bin/sh -lc "user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=tcp:127.0.0.1:4713' 'export DISPLAY=:0' 'export GALLIUM_DRIVER=virgl' '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
+        if chroot "$distro_path" /bin/sh -lc "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; user_home=\$(getent passwd \"$USER_NAME\" | cut -d: -f6 2>/dev/null || echo /root); printf '%s\n' '#!/bin/sh' 'export PULSE_SERVER=$pulse_server' 'export DISPLAY=:0' $hw_vars '$desktop_cmd' > \"\$user_home/.xstartup_native\"; chmod +x \"\$user_home/.xstartup_native\"; chown \"$USER_NAME\":\$(id -gn \"$USER_NAME\" 2>/dev/null || echo \"$USER_NAME\") \"\$user_home/.xstartup_native\"; su - \"$USER_NAME\" -c 'nohup \$HOME/.xstartup_native > \$HOME/x11_native.log 2>&1 &'" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
@@ -2302,12 +2316,33 @@ chroot_distro_jail() {
         (
             # try to ensure that su will do as proper login as possible to ensure consistent environment
             unset PREFIX;
-            # Automatic graphics and audio environment injection
-            export DISPLAY=:0
-            export PULSE_SERVER=tcp:127.0.0.1:4713
-            export GALLIUM_DRIVER=virpipe
-            export MESA_GL_VERSION_OVERRIDE=4.0
-            export MESA_GLES_VERSION_OVERRIDE=3.2
+            
+            # Load profile configuration for dynamic environment settings
+            # Using instance-specific config from the hidden chd-init folder
+            local CONF_DIR="$distro_path/root/.chd-init"
+            if [ -f "$CONF_DIR/profile.conf" ]; then
+                # shellcheck disable=SC1090
+                . "$CONF_DIR/profile.conf"
+            fi
+
+            # Dynamic Display Detection (X11 vs VNC)
+            # Default to X11 (:0) if present, otherwise use VNC_DISPLAY
+            local TARGET_DISPLAY=":0"
+            case " $INCLUDE " in
+                *" graphics/x11 "*) TARGET_DISPLAY=":0" ;;
+                *" graphics/vnc "*) TARGET_DISPLAY=":${VNC_DISPLAY:-1}" ;;
+            esac
+
+            # Automatic graphics and audio environment injection via profile.d
+            mkdir -p "$distro_path/etc/profile.d"
+            cat <<EOF > "$distro_path/etc/profile.d/chd.sh"
+export DISPLAY=$TARGET_DISPLAY
+export PULSE_SERVER=tcp:127.0.0.1:4713
+export GALLIUM_DRIVER=virpipe
+export MESA_GL_VERSION_OVERRIDE=4.0
+export MESA_GLES_VERSION_OVERRIDE=3.2
+EOF
+            chmod 644 "$distro_path/etc/profile.d/chd.sh"
 
             if [ "" != "$command" ]; then
                 # shellcheck disable=SC1007
@@ -2339,12 +2374,31 @@ chroot_distro_jail() {
         unset BOOTCLASSPATH;
         unset SYSTEMSERVERCLASSPATH;
         unset LD_LIBRARY_PATH;
-        # Automatic graphics and audio environment injection
-        export DISPLAY=:0
-        export PULSE_SERVER=tcp:127.0.0.1:4713
-        export GALLIUM_DRIVER=virpipe
-        export MESA_GL_VERSION_OVERRIDE=4.0
-        export MESA_GLES_VERSION_OVERRIDE=3.2
+        
+        # Load profile configuration for dynamic environment settings
+        local CONF_DIR="$distro_path/root/.chd-init"
+        if [ -f "$CONF_DIR/profile.conf" ]; then
+            # shellcheck disable=SC1090
+            . "$CONF_DIR/profile.conf"
+        fi
+
+        # Dynamic Display Detection (X11 vs VNC)
+        local TARGET_DISPLAY=":0"
+        case " $INCLUDE " in
+            *" graphics/x11 "*) TARGET_DISPLAY=":0" ;;
+            *" graphics/vnc "*) TARGET_DISPLAY=":${VNC_DISPLAY:-1}" ;;
+        esac
+
+        # Automatic graphics and audio environment injection via profile.d
+        mkdir -p "$distro_path/etc/profile.d"
+        cat <<EOF > "$distro_path/etc/profile.d/chd.sh"
+export DISPLAY=$TARGET_DISPLAY
+export PULSE_SERVER=tcp:127.0.0.1:4713
+export GALLIUM_DRIVER=virpipe
+export MESA_GL_VERSION_OVERRIDE=4.0
+export MESA_GLES_VERSION_OVERRIDE=3.2
+EOF
+        chmod 644 "$distro_path/etc/profile.d/chd.sh"
 
         if [ "" != "$command" ]; then
             SHELL=/bin/sh HOME="$JAIL_HOME" PATH="$JAIL_PATH" chroot "$distro_path/" /bin/sh -lc "$command"
