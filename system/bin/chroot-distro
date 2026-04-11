@@ -132,7 +132,8 @@ host_run_in_termux() {
     local TERMUX_DIR="/data/data/com.termux"
     local TERMUX_USER
     # Termux user is identical to the owner of the main termux directory in Android
-    TERMUX_USER=$(stat -c %U "$TERMUX_DIR" 2>/dev/null)
+    # Use %u (UID) instead of %U (Name) for better compatibility with su in Android
+    TERMUX_USER=$(stat -c %u "$TERMUX_DIR" 2>/dev/null)
     if [ -z "$TERMUX_USER" ] || [ "$TERMUX_USER" = "root" ]; then
         # Fallback if unresolvable, though this usually breaks Termux binaries missing LD_LIBRARY_PATH
         "$@"
@@ -141,12 +142,13 @@ host_run_in_termux() {
     # Drop root privileges down to the Termux Android App User with Network GIDs.
     # Specify each supplementary group individually to satisfy MagiskSU syntax.
     # Inject essential ENVs so Termux dynamic linker and binaries locate their shared libraries.
+    # We use sh -c to ensure the environment is correctly inherited and CWD is set to HOME.
     su "$TERMUX_USER" -G 3003 -G 3004 -G 3005 -c "env PREFIX=$TERMUX_DIR/files/usr \
 LD_LIBRARY_PATH=$TERMUX_DIR/files/usr/lib \
-PATH=$TERMUX_DIR/files/usr/bin:$TERMUX_DIR/files/usr/bin/applets:/system/bin \
+PATH=$TERMUX_DIR/files/usr/bin:/system/bin \
 HOME=$TERMUX_DIR/files/home \
 TMPDIR=$TERMUX_DIR/files/usr/tmp \
-$*"
+/system/bin/sh -c \"cd \$HOME && $*\""
 }
 
 architecture=$(uname -m)
@@ -1969,9 +1971,19 @@ chroot_distro_start_runtime_services() {
         }
         chroot_distro_start_host_x11 || true
 
-        # 2. Bind-mount the .X11-unix directory regardless of script exit code
-        # The socket may have been created by a previous session or by am start
-        if [ -d "$TERMUX_TMP/.X11-unix" ] && [ -S "$TERMUX_TMP/.X11-unix/X${X11_DISPLAY:-0}" ]; then
+        # 2. Bind-mount the .X11-unix directory with retry
+        i=0
+        X11_SOCKET_FOUND="false"
+        while [ "$i" -lt 6 ]; do
+            if [ -S "$TERMUX_TMP/.X11-unix/X${X11_DISPLAY:-0}" ]; then
+                X11_SOCKET_FOUND="true"
+                break
+            fi
+            sleep 0.5
+            i=$((i + 1))
+        done
+
+        if [ "$X11_SOCKET_FOUND" = "true" ]; then
             mkdir -p "$distro_path/tmp/.X11-unix"
             if ! mountpoint -q "$distro_path/tmp/.X11-unix"; then
                 mount --bind "$TERMUX_TMP/.X11-unix" "$distro_path/tmp/.X11-unix" >/dev/null 2>&1 && \
@@ -2001,14 +2013,22 @@ chroot_distro_start_runtime_services() {
         }
         chroot_distro_start_host_virgl || true
 
-        # 2. Bind-mount the Virgl socket regardless of script exit code
-        # virgl_test_server may already be running from a previous session
-        if [ -S "$TERMUX_TMP/.virgl_test" ]; then
+        # 2. Bind-mount the Virgl socket with retry
+        i=0
+        VIRGL_SOCKET_FOUND="false"
+        while [ "$i" -lt 6 ]; do
+            if [ -S "$TERMUX_TMP/.virgl_test" ]; then
+                VIRGL_SOCKET_FOUND="true"
+                break
+            fi
+            sleep 0.5
+            i=$((i + 1))
+        done
+
+        if [ "$VIRGL_SOCKET_FOUND" = "true" ]; then
             if ! mountpoint -q "$distro_path/tmp/.virgl_test"; then
-                # Target must not be a regular file — remove it and create a socket placeholder
-                rm -f "$distro_path/tmp/.virgl_test" 2>/dev/null || true
-                # Create a UNIX socket file as bind target using a temp server trick
-                # Simpler: just mount --bind directly (works even if target is absent on tmpfs)
+                # Ensure placeholder exists
+                touch "$distro_path/tmp/.virgl_test" 2>/dev/null || true
                 mount --bind "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" >/dev/null 2>&1 && \
                     chroot "$distro_path" /bin/sh -c "chmod 666 /tmp/.virgl_test" >/dev/null 2>&1 || true
             fi
