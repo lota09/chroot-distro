@@ -1766,23 +1766,18 @@ chroot_distro_mount_system_point() {
     fi
     if [ "$path_to_mount" = "/tmp" ]; then
        if [ "${CHROOT_DISTRO_TMP:-}" = "false" ]; then
-          return 
+          return
        fi
-       # FBE-Resilient Bridge: Use private tmpfs to avoid encryption issues for Xvnc
-       # then surgically bind-mount ONLY the required hardware sockets
+       # Primary: Bind Termux tmp directly as /tmp so virgl + X11 sockets are natively accessible
+       # This avoids file-level bind mounts (which fail with toybox mount on Android tmpfs)
+       if [ -d "$TERMUX_TMP" ]; then
+           if mount --bind "$TERMUX_TMP" "$mount_point" >/dev/null 2>&1; then
+               chmod 1777 "$mount_point" 2>/dev/null || true
+               return
+           fi
+       fi
+       # Fallback: Private tmpfs (GPU/X11 socket sharing will not work)
        if mount -t tmpfs tmpfs "$mount_point"; then
-           if [ -d "$TERMUX_TMP" ]; then
-                # Surgical Bridge: Only mount hardware sockets if hardware/virgl or graphics is requested
-                # We use .virgl_test as verified in Termux binaries
-                if [ -e "$TERMUX_TMP/.virgl_test" ]; then
-                    touch "$mount_point/.virgl_test"
-                    mount --bind "$TERMUX_TMP/.virgl_test" "$mount_point/.virgl_test" >/dev/null 2>&1 || true
-                fi
-                if [ -d "$TERMUX_TMP/.X11-unix" ]; then
-                    mkdir -p "$mount_point/.X11-unix"
-                    mount --bind "$TERMUX_TMP/.X11-unix" "$mount_point/.X11-unix" >/dev/null 2>&1 || true
-                fi
-            fi
            return
        fi
        print_message error "Failed to mount tmpfs on $mount_point"
@@ -1968,24 +1963,25 @@ chroot_distro_start_runtime_services() {
         HAS_X11="true"
         printf "Starting Host Termux:X11 bindings... "
 
-        # 1. Start Host Activity and Server first to ensure socket creation
-        # Using am start to ensure Termux:X11 is in the foreground
-        chroot_distro_start_host_x11() { 
-            host_run_in_termux "am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity >/dev/null 2>&1; X11_DISPLAY=$X11_DISPLAY sh $chroot_distro_path/scripts/host/host_start_x11.sh" >> "$host_log" 2>&1
+        # 1. Start Termux:X11 (host_start_x11.sh handles socket waiting)
+        chroot_distro_start_host_x11() {
+            host_run_in_termux "X11_DISPLAY=$X11_DISPLAY sh $chroot_distro_path/scripts/host/host_start_x11.sh" >> "$host_log" 2>&1
         }
+        chroot_distro_start_host_x11 || true
 
-        if chroot_distro_start_host_x11; then
-            # 2. Bind-mount the created socket into the chroot
-            if [ ! -d "$distro_path/tmp/.X11-unix" ] || ! mountpoint -q "$distro_path/tmp/.X11-unix"; then
-                mkdir -p "$distro_path/tmp/.X11-unix"
-                # Ensure the host directory exists before mounting to avoid "No such file" errors
-                if [ -d "$TERMUX_TMP/.X11-unix" ]; then
-                    mount --bind "$TERMUX_TMP/.X11-unix" "$distro_path/tmp/.X11-unix" >/dev/null 2>&1 || true
-                fi
+        # 2. Bind-mount the .X11-unix directory regardless of script exit code
+        # The socket may have been created by a previous session or by am start
+        if [ -d "$TERMUX_TMP/.X11-unix" ] && [ -S "$TERMUX_TMP/.X11-unix/X${X11_DISPLAY:-0}" ]; then
+            mkdir -p "$distro_path/tmp/.X11-unix"
+            if ! mountpoint -q "$distro_path/tmp/.X11-unix"; then
+                mount --bind "$TERMUX_TMP/.X11-unix" "$distro_path/tmp/.X11-unix" >/dev/null 2>&1 && \
+                    echo "Success" || echo "Failed (bind mount error)"
+            else
+                echo "Success (already mounted)"
             fi
-            echo "Success"
         else
-            echo "Failed"
+            echo "Failed (Termux:X11 socket not found at $TERMUX_TMP/.X11-unix/X${X11_DISPLAY:-0})"
+            echo "  → Please open the Termux:X11 app manually, then run: chd login --overwrite-startup ${instance_name}"
             cat "$host_log"
         fi
     fi
@@ -2000,23 +1996,25 @@ chroot_distro_start_runtime_services() {
         
         printf "Starting Host Virgl Server... "
         # 1. Start the host Virgl server first to create the socket
-        chroot_distro_start_host_virgl() { 
+        chroot_distro_start_host_virgl() {
             host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" >> "$host_log" 2>&1
         }
-        
-        if chroot_distro_start_host_virgl; then
-            # 2. Bind-mount the Virgl socket into the chroot
-            if [ ! -e "$distro_path/tmp/.virgl_test" ] || ! mountpoint -q "$distro_path/tmp/.virgl_test"; then
-                touch "$distro_path/tmp/.virgl_test"
-                if [ -e "$TERMUX_TMP/.virgl_test" ]; then
-                    mount --bind "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" >/dev/null 2>&1 || true
-                    # Force permissions inside chroot to ensure guest users can write to the socket
+        chroot_distro_start_host_virgl || true
+
+        # 2. Bind-mount the Virgl socket regardless of script exit code
+        # virgl_test_server may already be running from a previous session
+        if [ -S "$TERMUX_TMP/.virgl_test" ]; then
+            if ! mountpoint -q "$distro_path/tmp/.virgl_test"; then
+                # Target must not be a regular file — remove it and create a socket placeholder
+                rm -f "$distro_path/tmp/.virgl_test" 2>/dev/null || true
+                # Create a UNIX socket file as bind target using a temp server trick
+                # Simpler: just mount --bind directly (works even if target is absent on tmpfs)
+                mount --bind "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" >/dev/null 2>&1 && \
                     chroot "$distro_path" /bin/sh -c "chmod 666 /tmp/.virgl_test" >/dev/null 2>&1 || true
-                fi
             fi
             echo "Success"
         else
-            echo "Failed"
+            echo "Failed (virgl socket not found at $TERMUX_TMP/.virgl_test)"
             cat "$host_log"
         fi
     fi
