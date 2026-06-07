@@ -49,7 +49,7 @@ else
         --activity-clear-top >> "$LOGFILE" 2>&1 || true
 
     # Also try the termux-x11 CLI method as fallback
-    "$TERMUX_PREFIX/bin/termux-x11" ":${X11_DISPLAY:-0}" -ac >> "$LOGFILE" 2>&1 &
+    "$TERMUX_PREFIX/bin/termux-x11" ":${X11_DISPLAY:-0}" -ac -extension MIT-SHM >> "$LOGFILE" 2>&1 &
 
     # Wait for the socket to appear
     # If installation was performed, wait up to 30 seconds, otherwise 15 seconds

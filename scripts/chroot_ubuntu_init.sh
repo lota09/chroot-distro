@@ -157,8 +157,7 @@ run apt install -y vim net-tools sudo git dbus-x11 mesa-utils pulseaudio-utils a
 run apt install -y mesa-vulkan-drivers vulkan-tools libegl1 libgl1-mesa-dri
 log_result Success "Init: apt update/upgrade + base tools"
 
-log "=== Init: Timezone configuration ==="
-# Ensure debconf runs noninteractive and preseed tzdata to avoid prompts
+log "=== Init: Timezone configuration ==="# Ensure debconf runs noninteractive and preseed tzdata to avoid prompts
 export DEBIAN_FRONTEND=noninteractive
 # Preseed tzdata to avoid interactive prompts
 TZ_VALUE="${TIMEZONE:-$(cat /etc/timezone 2>/dev/null || true)}"

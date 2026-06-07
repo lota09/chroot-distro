@@ -1,6 +1,6 @@
 {
-  "version": "3.1.2",
+  "version": "3.1.5",
   "versionCode": 18,
-  "zipUrl": "https://github.com/lota09/chroot-distro/releases/download/v3.1.2/chroot-distro.zip",
+  "zipUrl": "https://github.com/lota09/chroot-distro/releases/download/v3.1.5/chroot-distro.zip",
   "changelog": "https://raw.githubusercontent.com/lota09/chroot-distro/main/CHANGELOG.md"
 }
