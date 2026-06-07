@@ -557,73 +557,53 @@ fi
 ram_bind_file="$config_dir/ram_bind"
 ram_bind_val=""
 
-ram_bind() {
-    ram_bind_val=$(cat "$ram_bind_file" 2>/dev/null)
+# Unified bind configuration helper: manages enable/disable state for tmpfs and android mounts
+# Usage: chroot_distro_bind_config name_label config_file value_var [action]
+chroot_distro_bind_config() {
+    local label="$1" file="$2" value_var="$3" action="$4"
+    local current_val
+
+    current_val=$(cat "$file" 2>/dev/null)
 
     if [ -n "$config_writable" ]; then
-        # If the argument is "enable", write 1 to the ram bind file
-        if [ "$1" = "enable" ]; then
-            if [ "$ram_bind_val" != "1" ]; then
-                echo 1 > "$ram_bind_file"
+        if [ "$action" = "enable" ]; then
+            if [ "$current_val" != "1" ]; then
+                echo 1 > "$file"
             else
-                print_message warning "ram bind is enabled already"
+                print_message warning "$label is enabled already"
                 return 1
             fi
-        # If the argument is "disable", write 0 to the ram bind file
-        elif [ "$1" = "disable" ]; then
-            if [ "$ram_bind_val" != "0" ]; then
-                echo 0 > "$ram_bind_file"
+        elif [ "$action" = "disable" ]; then
+            if [ "$current_val" != "0" ]; then
+                echo 0 > "$file"
             else
-                print_message warning "ram bind is disabled already"
+                print_message warning "$label is disabled already"
                 return 1
             fi
         fi
-    elif [ -z "$ram_bind_val" ]; then
-        ram_bind_val=1
     fi
 
-    # Re-read the value from the ram bind file
-    ram_bind_val=$(cat "$ram_bind_file" 2>/dev/null)
+    # Re-read value after any writes
+    current_val=$(cat "$file" 2>/dev/null)
 
+    # Set variable by name (indirect variable assignment)
+    eval "${value_var}='${current_val:-1}'"
+}
+
+ram_bind() {
+    chroot_distro_bind_config "ram bind" "$ram_bind_file" "ram_bind_val" "$1"
 }
 
 if [ -n "$config_writable" ] && [ ! -f "$ram_bind_file" ]; then
     ram_bind enable
 fi
-
 ram_bind
 
 android_bind_file="$config_dir/android_bind"
 android_bind_val=""
 
 android_bind() {
-    android_bind_val=$(cat "$android_bind_file" 2>/dev/null)
-
-    if [ -n "$config_writable" ]; then
-        # If the argument is "enable", write 1 to the android bind file
-        if [ "$1" = "enable" ]; then
-            if [ "$android_bind_val" != "1" ]; then
-                echo 1 > "$android_bind_file"
-            else
-                print_message warning "android bind is enabled already"
-                return 1
-            fi
-        # If the argument is "disable", write 0 to the android bind file
-        elif [ "$1" = "disable" ]; then
-            if [ "$android_bind_val" != "0" ]; then
-                echo 0 > "$android_bind_file"
-            else
-                print_message warning "android bind is disabled already"
-                return 1
-            fi
-        fi
-    elif [ -z "$android_bind_val" ]; then
-        android_bind_val=1
-    fi
-
-    # Re-read the value from the android bind file
-    android_bind_val=$(cat "$android_bind_file" 2>/dev/null)
-
+    chroot_distro_bind_config "android bind" "$android_bind_file" "android_bind_val" "$1"
 }
 
 if [ "${operating_system}" != "GNU/Linux" ] && [ "${operating_system}" != "Linux" ]; then
@@ -633,7 +613,7 @@ if [ "${operating_system}" != "GNU/Linux" ] && [ "${operating_system}" != "Linux
     android_bind
 else
     android_bind_val=0
-fi 
+fi
 
 system_points="/dev /sys /proc /dev/pts"
 
@@ -1789,23 +1769,23 @@ chroot_distro_mount_system_point() {
            mount --bind "$TERMUX_TMP/.X11-unix" "$mount_point/.X11-unix" >/dev/null 2>&1 || true
        fi
        chmod 1777 "$mount_point" 2>/dev/null || true
-    elif [ "$path_to_mount" = "/run" ]; then 
-       run_path=$(printf '%s\n' "$mount_point" | sed 's|^/var/run|/run|')
-       if [ ! -e "$run_path" ]; then
+    elif [ "$path_to_mount" = "/run" ]; then
+        run_path=$(printf '%s\n' "$mount_point" | sed 's|^/var/run|/run|')
+        if [ ! -e "$run_path" ]; then
             rm -rf "$run_path"
             ln -s "$run_path" "$mount_point"
-       fi
-       if ! mount -t tmpfs tmpfs "$mount_point"; then
+        fi
+        if ! mount -t tmpfs tmpfs "$mount_point"; then
             print_message error "Failed to mount tmpfs on $mount_point"
             chroot_distro_exit 1
         fi
     elif [ "$path_to_mount" = "/var/tmp" ]; then
-       if ! mount -t tmpfs tmpfs "$mount_point"; then
+        if ! mount -t tmpfs tmpfs "$mount_point"; then
             print_message error "Failed to mount tmpfs on $mount_point"
             chroot_distro_exit 1
         fi
-     elif [ "$path_to_mount" = "/dev/shm" ]; then 
-       if ! mount -t tmpfs tmpfs "$mount_point"; then
+    elif [ "$path_to_mount" = "/dev/shm" ]; then
+        if ! mount -t tmpfs tmpfs "$mount_point"; then
             print_message error "Failed to mount tmpfs on $mount_point"
             chroot_distro_exit 1
         fi
@@ -1815,13 +1795,13 @@ chroot_distro_mount_system_point() {
             chroot_distro_exit 1
         fi
     else
-        if [ "$path_to_mount" = "$distro_path" ]; then 
-           mount_point="$distro_path"
-       fi
+        if [ "$path_to_mount" = "$distro_path" ]; then
+            mount_point="$distro_path"
+        fi
         if ! mount --bind "$path_to_mount" "$mount_point"; then
             print_message error "Failed to bind mount $path_to_mount on $mount_point"
             chroot_distro_exit 1
-        fi 
+        fi
     fi
 }
 
@@ -2370,22 +2350,26 @@ EOF
 
 prepare_chroot_distro() {
    distro_path="$1"
-   cp /etc/hosts "$distro_path"/etc/hosts 
+   if ! cp /etc/hosts "$distro_path"/etc/hosts 2>/dev/null; then
+       print_message warning "Failed to copy /etc/hosts to chroot"
+   fi
    if [ "${operating_system}" != "GNU/Linux" ] && [ "${operating_system}" != "Linux" ]; then
-      {
-       echo "3003 aid_inet"
-       echo "3004 aid_net_raw"
-       echo "1003 aid_graphics"
-       echo "1004 aid_input"
-       echo "1005 aid_audio"
-       echo "1006 aid_video"
-       echo "1007 aid_drm"
-       } >> "$distro_path/etc/group"
-       # Add usermod for _apt only if the distro is Debian-based
-       if chroot "$distro_path" /bin/id _apt >/dev/null 2>&1; then
-          chroot "$distro_path" /sbin/usermod -g 3003 -G 3003,3004 -a _apt 2>/dev/null
-       fi
-       chroot "$distro_path" /sbin/usermod -G 3003 -a root 2>/dev/null
+      # Idempotent group addition: only add if not already present
+      for gid_name in "3003 aid_inet" "3004 aid_net_raw" "1003 aid_graphics" "1004 aid_input" "1005 aid_audio" "1006 aid_video" "1007 aid_drm"; do
+          gid="${gid_name%% *}"
+          if ! grep -q "^$gid " "$distro_path/etc/group"; then
+              echo "$gid_name" >> "$distro_path/etc/group"
+          fi
+      done
+      # Add usermod for _apt only if the distro is Debian-based
+      if chroot "$distro_path" /bin/id _apt >/dev/null 2>&1; then
+          if ! chroot "$distro_path" /sbin/usermod -g 3003 -G 3003,3004 -a _apt 2>/dev/null; then
+              print_message warning "Failed to add _apt to aid_inet group"
+          fi
+      fi
+      if ! chroot "$distro_path" /sbin/usermod -G 3003 -a root 2>/dev/null; then
+          print_message warning "Failed to add root to aid_inet group"
+      fi
     fi
 } 
 
@@ -2468,29 +2452,43 @@ chroot_distro_install() {
         mkdir -p "$distro_path"
         if ! tar -xf "$archive_path" -C "$distro_path/"; then
             print_message error "Failed to unpack the '${distro}' rootfs archive. The archive may be corrupted or incomplete."
+            print_message warning "Cleaning up incomplete instance at: $distro_path"
+            rm -rf "$distro_path"
             chroot_distro_exit 5
         fi
         print_message info "Rootfs unpacked to: $distro_path"
     else
-        mkdir -p "$distro_path"
+        if ! mkdir -p "$distro_path"; then
+            print_message error "Failed to create instance directory: $distro_path"
+            chroot_distro_exit 1
+        fi
         tar -xf "$archive_path" -C "$chroot_distro_path/"
         tar_status=$?
         if [ $tar_status -ne 0 ] && [ ! -e "$chroot_distro_path/$rootdir" ]; then
-            # can bail out early as no files were unpacked
             print_message error "Failed to unpack the '${distro}' rootfs archive. The archive may be corrupted or incomplete."
+            print_message warning "Cleaning up incomplete instance at: $distro_path"
+            rm -rf "$distro_path"
             chroot_distro_exit 5
         fi
         if [ $tar_status -ne 0 ]; then
-            # can bail out only when the environment is in semi consistent state
             print_message error "Failed to unpack the '${distro}' rootfs archive. The archive may be corrupted or incomplete."
+            print_message warning "Cleaning up incomplete instance at: $distro_path"
+            rm -rf "$distro_path"
             chroot_distro_exit 5
         fi
-        mv "$chroot_distro_path/$rootdir"/* "$distro_path"/
-        rmdir "$chroot_distro_path/$rootdir" 2>/dev/null
+        if ! mv "$chroot_distro_path/$rootdir"/* "$distro_path"/ 2>/dev/null; then
+            print_message error "Failed to move rootfs contents. The instance may be in an inconsistent state."
+            print_message warning "Cleaning up incomplete instance at: $distro_path"
+            rm -rf "$distro_path"
+            chroot_distro_exit 5
+        fi
+        rmdir "$chroot_distro_path/$rootdir" 2>/dev/null || true
         print_message info "Rootfs unpacked to: $distro_path"
     fi
 
-    mkdir -p "$distro_path/root/.chd-init"
+    if ! mkdir -p "$distro_path/root/.chd-init"; then
+        print_message warning "Failed to create chd-init directory"
+    fi
     echo "[Success] Install: Rootfs Download and Extract" > "$chroot_distro_path/log/chd_init_summary.log"
     if [ -n "$chroot_distro_image_file" ]; then
         echo "[Success] Install: Create and Mount Image ($chroot_distro_image_file)" >> "$chroot_distro_path/log/chd_init_summary.log"
@@ -2504,12 +2502,18 @@ chroot_distro_install() {
     install_conf_path=""
     if [ -n "$profile_conf" ]; then
         install_conf_path="$chroot_distro_path/.config/${instance_name}.conf"
-        cp "$profile_conf" "$install_conf_path"
-        print_message info "Saved install config: $install_conf_path"
+        if ! cp "$profile_conf" "$install_conf_path"; then
+            print_message warning "Failed to save install config"
+        else
+            print_message info "Saved install config: $install_conf_path"
+        fi
     elif [ -f "$chroot_distro_path/default.conf" ]; then
         install_conf_path="$chroot_distro_path/.config/${instance_name}.conf"
-        cp "$chroot_distro_path/default.conf" "$install_conf_path"
-        print_message info "Saved install config: $install_conf_path"
+        if ! cp "$chroot_distro_path/default.conf" "$install_conf_path"; then
+            print_message warning "Failed to copy default config"
+        else
+            print_message info "Saved install config: $install_conf_path"
+        fi
     fi
 
     if [ "$no_init" != "yes" ] && chroot_distro_init_supported "$distro"; then
