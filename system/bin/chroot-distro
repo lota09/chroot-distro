@@ -1306,7 +1306,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-    3.1.5 (staging)
+    3.1.6 (staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -1778,20 +1778,17 @@ chroot_distro_mount_system_point() {
        if [ "${CHROOT_DISTRO_TMP:-}" = "false" ]; then
           return
        fi
-       # Primary: Bind Termux tmp directly as /tmp so virgl + X11 sockets are natively accessible
-       # This avoids file-level bind mounts (which fail with toybox mount on Android tmpfs)
-       if [ -d "$TERMUX_TMP" ]; then
-           if mount --bind "$TERMUX_TMP" "$mount_point" >/dev/null 2>&1; then
-               chmod 1777 "$mount_point" 2>/dev/null || true
-               return
-           fi
+       # FBE workaround: Always use tmpfs for /tmp to avoid FBE constraints on Android /data partition
+       # This ensures APT and other tools can create temporary files without permission errors
+       if ! mount -t tmpfs tmpfs "$mount_point"; then
+           print_message error "Failed to mount tmpfs on $mount_point"
+           chroot_distro_exit 1
        fi
-       # Fallback: Private tmpfs (GPU/X11 socket sharing will not work)
-       if mount -t tmpfs tmpfs "$mount_point"; then
-           return
+       # Optional: Try to bind Termux X11 socket after tmpfs is mounted
+       if [ -d "$TERMUX_TMP/.X11-unix" ]; then
+           mount --bind "$TERMUX_TMP/.X11-unix" "$mount_point/.X11-unix" >/dev/null 2>&1 || true
        fi
-       print_message error "Failed to mount tmpfs on $mount_point"
-       chroot_distro_exit 1
+       chmod 1777 "$mount_point" 2>/dev/null || true
     elif [ "$path_to_mount" = "/run" ]; then 
        run_path=$(printf '%s\n' "$mount_point" | sed 's|^/var/run|/run|')
        if [ ! -e "$run_path" ]; then
