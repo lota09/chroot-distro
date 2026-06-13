@@ -87,6 +87,8 @@ elif [ "$HAS_X11" = "true" ]; then
     [ -z "$USER_NAME" ] && USER_NAME="root"
     USER_HOME=$(_get_user_home "$USER_NAME")
 
+    echo "[info] X11 mode: USER_NAME=$USER_NAME, USER_HOME=$USER_HOME, DISPLAY=$DISPLAY" >&2
+
     if [ -n "$USER_HOME" ]; then
         [ -d "$USER_HOME" ] || mkdir -p "$USER_HOME"
     else
@@ -95,6 +97,7 @@ elif [ "$HAS_X11" = "true" ]; then
     fi
 
     XSTARTUP="$USER_HOME/.xstartup_native"
+    echo "[info] Creating $XSTARTUP" >&2
 
         # Generate the Native X11 startup script.
         cat <<XEOF > "$XSTARTUP"
@@ -140,8 +143,12 @@ XEOF
     fi
 
     # Start the Native X11 session in background
-    su - "$USER_NAME" -c "nohup \$HOME/.xstartup_native > \"\$HOME/x11_native.log\" 2>&1 &" \
-        || echo "[warn] .xstartup_native failed to start (non-fatal)"
+    echo "[info] Starting X11 session as $USER_NAME" >&2
+    if su - "$USER_NAME" -c "nohup \$HOME/.xstartup_native > \"\$HOME/x11_native.log\" 2>&1 &"; then
+        echo "[info] X11 session started successfully" >&2
+    else
+        echo "[warn] .xstartup_native failed to start (non-fatal), exit code: $?" >&2
+    fi
 fi
 
 exit 0
