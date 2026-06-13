@@ -97,7 +97,13 @@ elif [ "$HAS_X11" = "true" ]; then
     fi
 
     XSTARTUP="$USER_HOME/.xstartup_native"
-    echo "[info] Creating $XSTARTUP" >&2
+    echo "[info] Creating $XSTARTUP with DESKTOP_CMD=$DESKTOP_CMD" >&2
+
+    # Strip leading 'exec ' from DESKTOP_CMD if present (chroot_distro passes it wrapped)
+    _DESKTOP_CMD="$DESKTOP_CMD"
+    case "$_DESKTOP_CMD" in
+        exec\ *) _DESKTOP_CMD="${_DESKTOP_CMD#exec }" ;;
+    esac
 
         # Generate the Native X11 startup script.
         cat <<XEOF > "$XSTARTUP"
@@ -107,12 +113,7 @@ export DISPLAY="$DISPLAY"
 USER_HOME="$USER_HOME"
 export XAUTHORITY="$USER_HOME/.Xauthority"
 export XFWM4_DISABLE_COMPOSITOR=1
-# Resolve DESKTOP_CMD at runtime and strip a leading 'exec ' if present
-DESKTOP_CMD="\${DESKTOP_CMD:-startlxde}"
-case "$DESKTOP_CMD" in
-    exec\ *) DESKTOP_CMD="${DESKTOP_CMD#exec }" ;;
-esac
-exec dbus-launch --exit-with-session $DESKTOP_CMD
+exec dbus-launch --exit-with-session $_DESKTOP_CMD
 XEOF
 
     chmod +x "$XSTARTUP"
