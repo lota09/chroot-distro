@@ -4,9 +4,19 @@
 
 TERMUX_PREFIX="/data/data/com.termux/files/usr"
 TERMUX_TMP="$TERMUX_PREFIX/tmp"
-VIRGL_SOCKET="$TERMUX_TMP/.virgl_test"
 LOGFILE="$TERMUX_TMP/chd_host_virgl.log"
 > "$LOGFILE"
+
+# If CHROOT_TMP is provided and writable, place the socket there so chroot
+# processes (running as a different UID) can reach it directly without
+# crossing the Termux app-private directory boundary.
+if [ -n "$CHROOT_TMP" ] && [ -d "$CHROOT_TMP" ]; then
+    SOCKET_DIR="$CHROOT_TMP"
+    echo "[virgl] Using chroot tmp for socket: $SOCKET_DIR" >> "$LOGFILE"
+else
+    SOCKET_DIR="$TERMUX_TMP"
+fi
+VIRGL_SOCKET="$SOCKET_DIR/.virgl_test"
 
 # ─── 1. Already running? ──────────────────────────────────────────────────────
 if [ -S "$VIRGL_SOCKET" ] && pgrep -x "virgl_test_server" > /dev/null 2>&1; then
@@ -75,7 +85,7 @@ MESA_GL_VERSION_OVERRIDE=4.3COMPAT \
 MESA_GLES_VERSION_OVERRIDE=3.2 \
 GALLIUM_DRIVER=zink \
 ZINK_DESCRIPTORS=lazy \
-TMPDIR="$TERMUX_TMP" \
+TMPDIR="$SOCKET_DIR" \
 virgl_test_server --use-egl-surfaceless --use-gles \
     > "$TERMUX_TMP/virgl_output.log" 2>&1 &
 

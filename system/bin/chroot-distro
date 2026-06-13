@@ -1988,17 +1988,18 @@ chroot_distro_start_runtime_services() {
         fi
         
         printf "Starting Host Virgl Server... "
-        # 1. Start the host Virgl server first to create the socket
+        # 1. Start the host Virgl server, passing the chroot's /tmp so the socket
+        #    is created there directly (Termux's own /tmp is not accessible by other UIDs)
         chroot_distro_start_host_virgl() {
-            host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" >> "$host_log" 2>&1
+            host_run_in_termux "CHROOT_TMP=$distro_path/tmp sh $chroot_distro_path/scripts/host/host_start_virgl.sh" >> "$host_log" 2>&1
         }
         chroot_distro_start_host_virgl || true
 
-        # 2. Bind-mount the Virgl socket with retry
+        # 2. Check for the Virgl socket in chroot /tmp (created directly by host_start_virgl.sh)
         i=0
         VIRGL_SOCKET_FOUND="false"
-        while [ "$i" -lt 6 ]; do
-            if [ -S "$TERMUX_TMP/.virgl_test" ]; then
+        while [ "$i" -lt 10 ]; do
+            if [ -S "$distro_path/tmp/.virgl_test" ]; then
                 VIRGL_SOCKET_FOUND="true"
                 break
             fi
@@ -2007,13 +2008,10 @@ chroot_distro_start_runtime_services() {
         done
 
         if [ "$VIRGL_SOCKET_FOUND" = "true" ]; then
-            # Android busybox cannot bind-mount socket files (losetup fails).
-            # Use a symlink instead: chroot has /data mounted so the full path resolves.
-            rm -f "$distro_path/tmp/.virgl_test" 2>/dev/null || true
-            ln -sf "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" 2>/dev/null && \
-                echo "Success" || echo "Failed (symlink creation failed)"
+            chmod 666 "$distro_path/tmp/.virgl_test" 2>/dev/null || true
+            echo "Success"
         else
-            echo "Failed (virgl socket not found at $TERMUX_TMP/.virgl_test)"
+            echo "Failed (virgl socket not found at $distro_path/tmp/.virgl_test)"
             cat "$host_log"
         fi
     fi
