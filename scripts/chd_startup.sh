@@ -97,23 +97,17 @@ elif [ "$HAS_X11" = "true" ]; then
     fi
 
     XSTARTUP="$USER_HOME/.xstartup_native"
-    echo "[info] Creating $XSTARTUP with DESKTOP_CMD=$DESKTOP_CMD" >&2
-
-    # Strip leading 'exec ' from DESKTOP_CMD if present (chroot_distro passes it wrapped)
-    _DESKTOP_CMD="$DESKTOP_CMD"
-    case "$_DESKTOP_CMD" in
-        exec\ *) _DESKTOP_CMD="${_DESKTOP_CMD#exec }" ;;
-    esac
 
         # Generate the Native X11 startup script.
+        # DESKTOP_CMD already contains 'exec dbus-launch --exit-with-session <de>'
+        # so use it directly to avoid double-wrapping.
         cat <<XEOF > "$XSTARTUP"
 #!/bin/sh
 export PULSE_SERVER="$PULSE_SERVER"
 export DISPLAY="$DISPLAY"
-USER_HOME="$USER_HOME"
 export XAUTHORITY="$USER_HOME/.Xauthority"
 export XFWM4_DISABLE_COMPOSITOR=1
-exec dbus-launch --exit-with-session $_DESKTOP_CMD
+$DESKTOP_CMD
 XEOF
 
     chmod +x "$XSTARTUP"
