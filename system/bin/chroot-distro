@@ -2032,8 +2032,11 @@ chroot_distro_start_runtime_services() {
     local pulse_server="tcp:127.0.0.1:$pulse_port"
     local hw_vars=""
     if echo " $INCLUDE " | grep -q " hardware/virgl "; then
-        # Unified High-Performance GPU Settings (from Native Termux scripts)
-        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=virpipe; export MESA_GL_VERSION_OVERRIDE=4.3; export MESA_GLES_VERSION_OVERRIDE=3.2"
+        # Software rendering via Mesa softpipe (CPU-based, no virgl socket needed).
+        # virpipe requires virgl_test_server to expose a Unix socket inside the chroot's
+        # /tmp — this reliably fails on Android due to mount-namespace isolation for
+        # Termux app processes.  softpipe works without any GPU server.
+        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=softpipe; export LIBGL_ALWAYS_SOFTWARE=1; export MESA_GL_VERSION_OVERRIDE=4.3; export MESA_GLES_VERSION_OVERRIDE=3.2"
         
         # Ensure correct DRM and GPU access for the chroot by fixing host /dev/dri permissions
         if [ -d "${distro_path}/dev/dri" ]; then

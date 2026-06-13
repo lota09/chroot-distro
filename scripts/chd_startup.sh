@@ -116,11 +116,27 @@ XEOF
     chown -R "$USER_NAME":"$G_GROUP" "$USER_HOME" 2>/dev/null || true
     chown "$USER_NAME":"$G_GROUP" "$XSTARTUP"
 
+    # Disable xscreensaver: the system autostart includes it but it needs GL visuals
+    # not available without a working virgl server.  A user-level autostart takes
+    # precedence over /etc/xdg/lxsession/LXDE/autostart and omits xscreensaver.
+    mkdir -p "$USER_HOME/.config/lxsession/LXDE"
+    if [ ! -f "$USER_HOME/.config/lxsession/LXDE/autostart" ]; then
+        printf '@lxpanel --profile LXDE\n@pcmanfm --desktop --profile LXDE\n' \
+            > "$USER_HOME/.config/lxsession/LXDE/autostart"
+        chown -R "$USER_NAME":"$G_GROUP" "$USER_HOME/.config" 2>/dev/null || true
+    fi
+
+    # Prevent duplicate sessions: skip if lxsession is already running.
+    if pgrep -x lxsession > /dev/null 2>&1; then
+        echo "[info] lxsession already running — skipping duplicate start" >&2
+        exit 0
+    fi
+
     # virgl socket should already be present (host_start_virgl.sh waits for it).
     # Quick log only — no blocking wait needed here.
     [ -S /tmp/.virgl_test ] && \
         echo "[info] virgl socket present in guest" || \
-        echo "[warn] virgl socket not present — GPU accel may be unavailable"
+        echo "[info] virgl socket not present — using software rendering"
 
     # Optional: x11vnc mirror if VNC also requested (X11+VNC mirror mode)
     if [ "$HAS_VNC" = "true" ]; then
