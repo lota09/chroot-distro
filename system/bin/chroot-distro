@@ -2007,13 +2007,11 @@ chroot_distro_start_runtime_services() {
         done
 
         if [ "$VIRGL_SOCKET_FOUND" = "true" ]; then
-            if ! mountpoint -q "$distro_path/tmp/.virgl_test"; then
-                # Ensure placeholder exists
-                touch "$distro_path/tmp/.virgl_test" 2>/dev/null || true
-                mount --bind "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" >/dev/null 2>&1 && \
-                    chroot "$distro_path" /bin/sh -c "chmod 666 /tmp/.virgl_test" >/dev/null 2>&1 || true
-            fi
-            echo "Success"
+            # Android busybox cannot bind-mount socket files (losetup fails).
+            # Use a symlink instead: chroot has /data mounted so the full path resolves.
+            rm -f "$distro_path/tmp/.virgl_test" 2>/dev/null || true
+            ln -sf "$TERMUX_TMP/.virgl_test" "$distro_path/tmp/.virgl_test" 2>/dev/null && \
+                echo "Success" || echo "Failed (symlink creation failed)"
         else
             echo "Failed (virgl socket not found at $TERMUX_TMP/.virgl_test)"
             cat "$host_log"
