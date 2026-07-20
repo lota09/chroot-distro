@@ -1295,7 +1295,7 @@ License:
   Licensed under GNU GPL v3.0 - Free to use, modify, and distribute.
 
 Version:
-    3.1.7 (staging)
+    3.1.9 (staging)
 
 For more details, refer to the documentation or run '$script help'." 
 
@@ -2079,10 +2079,12 @@ chroot_distro_start_runtime_services() {
     local pulse_server="tcp:127.0.0.1:$pulse_port"
     local hw_vars=""
     if echo " $INCLUDE " | grep -q " hardware/virgl "; then
-        # virpipe: Mesa connects to virgl_test_server via /tmp/.virgl_test.
-        # The socket is exposed inside the chroot via a bind-mount of Termux tmp
-        # and a symlink (/tmp/.virgl_test → /tmp/host_virgl/.virgl_test).
-        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=virpipe; export MESA_GL_VERSION_OVERRIDE=4.3; export MESA_GLES_VERSION_OVERRIDE=3.2"
+        # Desktop session runs on softpipe (CPU/software) on purpose: driving the
+        # whole LXDE session (WM + panel + file-manager, all opening GL at once)
+        # through the virpipe -> virgl_test_server bridge is unreliable on Android
+        # and renders a black screen. GPU (virpipe) stays available for individual
+        # apps launched from a shell via /etc/profile.d/chd.sh further below.
+        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=softpipe; export LIBGL_ALWAYS_SOFTWARE=1; export MESA_GL_VERSION_OVERRIDE=4.3; export MESA_GLES_VERSION_OVERRIDE=3.2"
         
         # Ensure correct DRM and GPU access for the chroot by fixing host /dev/dri permissions
         if [ -d "${distro_path}/dev/dri" ]; then

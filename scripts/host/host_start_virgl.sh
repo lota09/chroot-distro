@@ -38,8 +38,17 @@ echo "[virgl] Previous instance cleaned up." >> "$LOGFILE"
 # before switching packages so nothing is ever left for a future unpack
 # to trip over, and we stop swallowing failures here so a broken install
 # surfaces immediately instead of silently leaving a half-configured state.
-if ! command -v virgl_test_server >/dev/null 2>&1; then
-    echo "[virgl] virgl_test_server not found. Installing Termux GPU packages..." >> "$LOGFILE"
+# The guard checks BOTH the server binary AND a Vulkan driver. virgl renders
+# GL via Zink -> Vulkan, so a Vulkan/Turnip ICD must exist too. Checking only
+# the binary is not enough: if the ICD is removed (e.g. a manual package swap)
+# the binary still exists but rendering dies with "failed to initialise
+# renderer" and clients get their connection reset. So verify the Turnip ICD
+# as well and repair the whole stack when it is missing.
+_need_gpu_install=0
+command -v virgl_test_server >/dev/null 2>&1 || _need_gpu_install=1
+ls "$TERMUX_PREFIX"/share/vulkan/icd.d/*freedreno*.json >/dev/null 2>&1 || _need_gpu_install=1
+if [ "$_need_gpu_install" = 1 ]; then
+    echo "[virgl] GPU stack incomplete (server binary or Turnip Vulkan ICD missing) - installing/repairing Termux GPU packages..." >> "$LOGFILE"
     pkg install -y tur-repo x11-repo </dev/null >> "$LOGFILE" 2>&1 || true
     pkg update -y </dev/null >> "$LOGFILE" 2>&1 || true
 
