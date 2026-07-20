@@ -38,47 +38,35 @@ echo "[virgl] Previous instance cleaned up." >> "$LOGFILE"
 # before switching packages so nothing is ever left for a future unpack
 # to trip over, and we stop swallowing failures here so a broken install
 # surfaces immediately instead of silently leaving a half-configured state.
-# The guard checks BOTH the server binary AND a Vulkan driver. virgl renders
-# GL via Zink -> Vulkan, so a Vulkan/Turnip ICD must exist too. Checking only
-# the binary is not enough: if the ICD is removed (e.g. a manual package swap)
-# the binary still exists but rendering dies with "failed to initialise
-# renderer" and clients get their connection reset. So verify the Turnip ICD
-# as well and repair the whole stack when it is missing.
-_need_gpu_install=0
-command -v virgl_test_server >/dev/null 2>&1 || _need_gpu_install=1
-ls "$TERMUX_PREFIX"/share/vulkan/icd.d/*freedreno*.json >/dev/null 2>&1 || _need_gpu_install=1
-if [ "$_need_gpu_install" = 1 ]; then
-    echo "[virgl] GPU stack incomplete (server binary or Turnip Vulkan ICD missing) - installing/repairing Termux GPU packages..." >> "$LOGFILE"
+# Guard: auto install/repair the GPU stack when the server binary OR the
+# Turnip Vulkan ICD is missing. virgl renders GL via Zink -> Vulkan, so BOTH
+# must be present; checking the binary alone misses a removed ICD (server
+# starts but rendering dies with "failed to initialise renderer").
+#
+# This installs as root (script runs via su), which tags new files with an
+# SELinux label the real Termux app cannot manage - a LATER manual apt/pkg
+# inside Termux may then hit dpkg "Permission denied" (fix: chcon the prefix
+# to $PREFIX/bin/bash's context). It does NOT touch OlliteRT/other apps:
+# they use the SYSTEM Vulkan driver, which Termux packages cannot modify.
+_need=0
+command -v virgl_test_server >/dev/null 2>&1 || _need=1
+ls "$TERMUX_PREFIX"/share/vulkan/icd.d/*freedreno*.json >/dev/null 2>&1 || _need=1
+if [ "$_need" = 1 ]; then
+    echo "[virgl] GPU stack incomplete - installing/repairing Termux GPU packages..." >> "$LOGFILE"
     pkg install -y tur-repo x11-repo </dev/null >> "$LOGFILE" 2>&1 || true
     pkg update -y </dev/null >> "$LOGFILE" 2>&1 || true
-
-    if dpkg -l 2>/dev/null | grep -q "^ii.*vulkan-loader-generic"; then
-        pkg uninstall -y vulkan-loader-generic </dev/null >> "$LOGFILE" 2>&1 || true
-    fi
-
-    # Belt-and-suspenders: dpkg's own removal doesn't always clean up every
-    # link in this chain (especially if a previous run was interrupted).
-    # Remove them ourselves so vulkan-loader-android's installer never has
-    # to stat a pre-existing link it doesn't own, and no future package
-    # ever inherits a dangling/inaccessible symlink from this swap.
-    echo "[virgl] Clearing any stale libvulkan.so* links before switching loader..." >> "$LOGFILE"
-    rm -f "$TERMUX_PREFIX/lib/libvulkan.so" \
-          "$TERMUX_PREFIX"/lib/libvulkan.so.[0-9]* 2>/dev/null || true
-
-    if ! pkg install -y mesa-zink virglrenderer-mesa-zink virglrenderer-android \
-        vulkan-loader-android </dev/null >> "$LOGFILE" 2>&1; then
-        echo "[virgl] ERROR: GPU loader package install failed — see log above." >> "$LOGFILE"
-        echo "[virgl] Aborting instead of leaving a half-installed GPU stack." >> "$LOGFILE"
-        exit 1
-    fi
-    apt install -y mesa-vulkan-icd-freedreno-dri3 </dev/null >> "$LOGFILE" 2>&1 || \
-        apt install -y mesa-vulkan-icd-freedreno </dev/null >> "$LOGFILE" 2>&1 || true
-    apt install -y vulkan-icd </dev/null >> "$LOGFILE" 2>&1 || true
+    # Preempt dpkg's "unable to securely remove libvulkan.so*" (symlinks into
+    # read-only /system) by clearing them before the loader swap.
+    rm -f "$TERMUX_PREFIX/lib/libvulkan.so" "$TERMUX_PREFIX"/lib/libvulkan.so.[0-9]* 2>/dev/null || true
+    # Working Adreno stack for virgl: Zink + generic loader (reads ICD JSONs)
+    # + freedreno Turnip ICD. (vulkan-loader-android points at the system
+    # driver and does NOT load the Turnip ICD, so Zink gets no Vulkan device.)
+    pkg install -y mesa-zink virglrenderer-mesa-zink virglrenderer-android \
+        vulkan-loader-generic mesa-vulkan-icd-freedreno </dev/null >> "$LOGFILE" 2>&1 || true
     dpkg --configure -a >> "$LOGFILE" 2>&1 || true
     apt -f install -y </dev/null >> "$LOGFILE" 2>&1 || true
-    echo "[virgl] Package installation complete." >> "$LOGFILE"
+    echo "[virgl] Package install/repair complete." >> "$LOGFILE"
 fi
-
 if ! command -v virgl_test_server >/dev/null 2>&1; then
     echo "[virgl] ERROR: virgl_test_server still not available after install." >> "$LOGFILE"
     exit 1

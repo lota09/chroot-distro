@@ -134,7 +134,7 @@ XEOF
             x11vnc -storepasswd '${_vnc_pass}' \$HOME/.vnc/passwd && \
             chmod 600 \$HOME/.vnc/passwd; \
             nohup x11vnc -display :0 -noshm -noxdamage -nowf -nowcr -ncache 10 -bg \
-            -passwdfile \$HOME/.vnc/passwd -listen 0.0.0.0 -xkb -shared -forever \
+            -rfbauth \$HOME/.vnc/passwd -rfbport 5900 -xkb -shared -forever \
             > \"\$HOME/x11vnc_mirror.log\" 2>&1 &" \
             || echo "[warn] x11vnc failed to start (non-fatal)"
     fi
