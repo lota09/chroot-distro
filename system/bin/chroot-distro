@@ -982,8 +982,15 @@ chroot_distro_init_run() {
     # Ensure chroot has a working resolver (create stub or file if needed)
     chroot_distro_fix_env "$distro_path" || true
 
-    print_message info "Running init inside chroot: $script_name"
-    chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; /bin/sh /root/.chd-init/$script_name --conf /root/.chd-init/profile.conf"
+    # Detect Android timezone and pass to init script so tzdata is configured
+    # non-interactively with the correct local timezone from the first install.
+    local _tz
+    _tz=$(getprop persist.sys.timezone 2>/dev/null | tr -d '[:space:]')
+    [ -z "$_tz" ] && _tz=$(cat /etc/timezone 2>/dev/null | tr -d '[:space:]')
+    [ -z "$_tz" ] && _tz="Etc/UTC"
+
+    print_message info "Running init inside chroot: $script_name (timezone: $_tz)"
+    TIMEZONE="$_tz" chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; /bin/sh /root/.chd-init/$script_name --conf /root/.chd-init/profile.conf"
 }
 
 chroot_distro_profile() {
@@ -1075,22 +1082,24 @@ chroot_distro_profile() {
     USER_PASSWORD="changeme"
 
     # Graphics Mode
+    # VNC Standalone (TigerVNC without a desktop/X11 surface) has been removed.
+    # Without a real display surface there is no reliable GPU-accelerated path on
+    # Android, so only GPU-compatible combinations are offered here: headless
+    # (no GPU needed), direct Termux:X11, or Termux:X11 mirrored to VNC.
     print_message note ""
     print_message note "Please choose your Graphics Mode:"
-    print_message note "  1) Headless       (CLI Only / No Graphics)"
-    print_message note "  2) Termux-X11     (GPU Accelerated, requires Termux:X11 app)"
-    print_message note "  3) VNC Standalone (TigerVNC only — GPU accel NOT guaranteed)"
-    print_message note "  4) X11 + VNC      (Termux:X11 + x11vnc mirror — GPU Accelerated, Recommended)"
+    print_message note "  1) Headless   (CLI Only / No Graphics)"
+    print_message note "  2) Termux-X11 (GPU Accelerated, requires Termux:X11 app)"
+    print_message note "  3) X11 + VNC  (Termux:X11 + x11vnc mirror — GPU Accelerated, Recommended)"
     while true; do
-        printf "Select (1-4) [default: 4]: " >&2
+        printf "Select (1-3) [default: 3]: " >&2
         read -r MODE_INPUT
-        MODE_INPUT=${MODE_INPUT:-4}
+        MODE_INPUT=${MODE_INPUT:-3}
         case "$MODE_INPUT" in
             1) GRAPHICS="none"; break ;;
             2) GRAPHICS="x11"; break ;;
-            3) GRAPHICS="vnc"; break ;;
-            4) GRAPHICS="vnc+x11"; break ;;
-            *) print_message warning "Invalid input. Please enter 1, 2, 3, or 4." ;;
+            3) GRAPHICS="vnc+x11"; break ;;
+            *) print_message warning "Invalid input. Please enter 1, 2, or 3." ;;
         esac
     done
 
@@ -1663,12 +1672,24 @@ chroot_distro_download() {
 
 chroot_distro_find_processes_with_open_files() {
     path="$1"
-    if [ "" != "$busyboxlsof" ]; then
-        # busybox has own format for lsof output
-        lsof | grep -F "$path" | grep -Eo '^[[:digit:]]+' | sort -n | uniq
-    else
-        lsof | grep -F "$path" | cut -c10- | grep -Eo '^ *[[:digit:]]+' | grep -Eo '[[:digit:]]+' | sort -n | uniq
-    fi
+    {
+        # Primary: lsof if available
+        if command -v lsof >/dev/null 2>&1; then
+            if [ "" != "$busyboxlsof" ]; then
+                lsof 2>/dev/null | grep -F "$path" | grep -Eo '^[[:digit:]]+'
+            else
+                lsof 2>/dev/null | grep -F "$path" | cut -c10- | grep -Eo '^ *[[:digit:]]+' | grep -Eo '[[:digit:]]+'
+            fi
+        fi
+        # Fallback: scan /proc for processes with root or cwd inside the path
+        for _ppid_dir in /proc/[0-9]*; do
+            _ppid="${_ppid_dir##*/}"
+            _proot=$(readlink "$_ppid_dir/root" 2>/dev/null || true)
+            _pcwd=$(readlink "$_ppid_dir/cwd" 2>/dev/null || true)
+            case "$_proot" in "$path"*) echo "$_ppid" ;; esac
+            case "$_pcwd" in "$path"*) echo "$_ppid" ;; esac
+        done
+    } | sort -n | uniq
 }
 
 chroot_distro_find_all_mount_points() {
@@ -1810,6 +1831,10 @@ mount_android_dirs() {
     [ -d "$dir" ] || continue
     case "$dir" in
       /storage|/bin|/boot|/etc|/home|/lib|/media|/opt|/root|/run|/sbin|/srv|/usr|/var|/linkerconfig|/tmp|/var/tmp|/dev/shm)
+        # Ubuntu filesystem paths — skip to avoid shadowing chroot's own directories
+        ;;
+      /keydata|/keyrefuge|/spu|/efs)
+        # FBE key material and security processor — never mount into chroot
         ;;
       *)
         echo " $system_points " | grep -q " $dir " && continue
@@ -1868,11 +1893,11 @@ chroot_distro_mount_system_points() {
     fi
     for point in $system_points; do
         printf "%sMounting %s... %s" "" "$point" ""
-        if chroot_distro_mount_system_point "$distro_path" "$point" "$distro_path$point" > ""$chroot_distro_path/log/chd_mount.log 2>&1; then
+        if chroot_distro_mount_system_point "$distro_path" "$point" "$distro_path$point" > "$chroot_distro_path/log/chd_mount.log" 2>&1; then
             echo "Success"
         else
             echo "Failed"
-            cat ""$chroot_distro_path/log/chd_mount.log
+            cat "$chroot_distro_path/log/chd_mount.log"
         fi
     done
 }
@@ -1890,8 +1915,7 @@ chroot_distro_start_runtime_services() {
     # shellcheck disable=SC1090
     . "$conf" || return 0
 
-    : ${USER_NAME:=${USER_NAME:-root}}
-    : ${USER_NAME:=${USER_NAME:-root}}
+    : ${USER_NAME:=root}
 
     # Initialize log files
     host_log="$chroot_distro_path/log/host_services.log"
@@ -1905,21 +1929,9 @@ chroot_distro_start_runtime_services() {
     fi
     chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; printf '#!/bin/sh\nexport PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\nexport PULSE_SERVER=tcp:127.0.0.1:${PULSE_PORT:-4713}\nexport DISPLAY=${_early_display}\n' > /etc/profile.d/chd_env.sh; chmod 644 /etc/profile.d/chd_env.sh" >> "$host_log" 2>&1
 
-    # Start SSH inside chroot (runs as root)
-    if echo " $INCLUDE " | grep -q " extra/ssh "; then
-        printf "Starting SSH... "
-        if chroot "$distro_path" /bin/sh -c "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; mkdir -p /run/sshd /var/run/sshd; if [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd $SSH_ARGS; else printf 'sshd missing\n' >&2; exit 2; fi" >> "$chroot_distro_path/log/chd_startup.log" 2>&1; then
-            echo "Success"
-        else
-            echo "Failed"
-            cat "$chroot_distro_path/log/chd_startup.log"
-        fi
-    fi
-
     # Start PulseAudio on HOST TERMUX
     if echo " $INCLUDE " | grep -q " extra/pulse "; then
         printf "Starting Host PulseAudio... "
-        # Pass the dynamic PULSE_PORT from profile to the host startup script
         host_run_in_termux "PULSE_PORT=${PULSE_PORT:-4713} sh $chroot_distro_path/scripts/host/host_start_pulseaudio.sh" >> "$host_log" 2>&1
         if [ $? -eq 0 ]; then
             echo "Success"
@@ -1928,10 +1940,12 @@ chroot_distro_start_runtime_services() {
             cat "$host_log"
         fi
     fi
-    # VNC standalone (graphics/vnc only) uses TigerVNC directly — no X11 implied.
-    # X11+VNC mirror mode (graphics/x11 + graphics/vnc) keeps both flags.
+
+    # Feature flags derived from INCLUDE — passed to chd_startup.sh as env vars.
+    HAS_SSH=false
     HAS_X11=false
     HAS_VNC=false
+    echo " $INCLUDE " | grep -q " extra/ssh "     && HAS_SSH=true
     echo " $INCLUDE " | grep -q " graphics/x11 " && HAS_X11=true
     echo " $INCLUDE " | grep -q " graphics/vnc " && HAS_VNC=true
 
@@ -1988,31 +2002,64 @@ chroot_distro_start_runtime_services() {
         fi
         
         printf "Starting Host Virgl Server... "
-        # 1. Start the host Virgl server, passing the chroot's /tmp so the socket
-        #    is created there directly (Termux's own /tmp is not accessible by other UIDs)
+        # Start virgl_test_server in Termux (creates socket in Termux's own tmp — reliable).
         chroot_distro_start_host_virgl() {
-            host_run_in_termux "CHROOT_TMP=$distro_path/tmp sh $chroot_distro_path/scripts/host/host_start_virgl.sh" >> "$host_log" 2>&1
+            host_run_in_termux "sh $chroot_distro_path/scripts/host/host_start_virgl.sh" >> "$host_log" 2>&1
         }
         chroot_distro_start_host_virgl || true
 
-        # 2. Check for the Virgl socket in chroot /tmp (created directly by host_start_virgl.sh)
+        # Wait for virgl socket to appear in Termux tmp.
+        TERMUX_VIRGL_SOCKET="$TERMUX_TMP/.virgl_test"
         i=0
-        VIRGL_SOCKET_FOUND="false"
         while [ "$i" -lt 10 ]; do
-            if [ -S "$distro_path/tmp/.virgl_test" ]; then
-                VIRGL_SOCKET_FOUND="true"
-                break
-            fi
+            [ -S "$TERMUX_VIRGL_SOCKET" ] && break
             sleep 0.5
             i=$((i + 1))
         done
 
-        if [ "$VIRGL_SOCKET_FOUND" = "true" ]; then
-            chmod 666 "$distro_path/tmp/.virgl_test" 2>/dev/null || true
-            echo "Success"
+        if [ -S "$TERMUX_VIRGL_SOCKET" ]; then
+            # Expose virgl socket inside the chroot by bind-mounting Termux tmp into
+            # chroot/tmp/host_virgl/ (root can traverse app-private dirs; a file bind
+            # would fail on Android busybox, but a directory bind works fine).
+            mkdir -p "$distro_path/tmp/host_virgl"
+            # Idempotency guard (mirrors the .X11-unix bind mount below): without
+            # this, every "chd start"/"chd login" during this session stacks one
+            # more bind mount at the same target instead of reusing the existing
+            # one, leaking mount table entries over repeated iteration.
+            if mountpoint -q "$distro_path/tmp/host_virgl" 2>/dev/null; then
+                echo "Success (already mounted)"
+            elif mount --bind "$TERMUX_TMP" "$distro_path/tmp/host_virgl" 2>/dev/null; then
+                chmod 666 "$distro_path/tmp/host_virgl/.virgl_test" 2>/dev/null || true
+                # Symlink /tmp/.virgl_test → /tmp/host_virgl/.virgl_test so Mesa's
+                # virpipe driver finds the socket at the standard path.
+                ln -sf /tmp/host_virgl/.virgl_test "$distro_path/tmp/.virgl_test" 2>/dev/null || true
+                echo "Success"
+            else
+                echo "Failed (bind mount of Termux tmp failed)"
+                cat "$host_log"
+                if [ -f "$TERMUX_TMP/chd_host_virgl.log" ]; then
+                    echo "--- $TERMUX_TMP/chd_host_virgl.log ---"
+                    cat "$TERMUX_TMP/chd_host_virgl.log"
+                fi
+            fi
         else
-            echo "Failed (virgl socket not found at $distro_path/tmp/.virgl_test)"
+            # host_start_virgl.sh already ran synchronously above (package install +
+            # its own up-to-15s internal socket wait), so this extra 5s is just a
+            # final recheck, not the primary wait — the message below reflects that.
+            echo "Failed (virgl socket still not present in Termux tmp; host_start_virgl.sh already ran and this was a further 5s recheck)"
             cat "$host_log"
+            # host_start_virgl.sh writes its real diagnostic detail (which package
+            # install step failed, virgl_test_server exit, virgl_output.log excerpt)
+            # to its own log file rather than stdout, so $host_log above is usually
+            # near-empty on failure. Surface the real log here so a failure is
+            # diagnosable from this single output instead of requiring a manual
+            # `adb shell cat /data/data/com.termux/files/usr/tmp/chd_host_virgl.log`.
+            if [ -f "$TERMUX_TMP/chd_host_virgl.log" ]; then
+                echo "--- $TERMUX_TMP/chd_host_virgl.log ---"
+                cat "$TERMUX_TMP/chd_host_virgl.log"
+            else
+                echo "(no $TERMUX_TMP/chd_host_virgl.log found — host_start_virgl.sh may not have run at all; check host_run_in_termux/su access)"
+            fi
         fi
     fi
 
@@ -2032,11 +2079,10 @@ chroot_distro_start_runtime_services() {
     local pulse_server="tcp:127.0.0.1:$pulse_port"
     local hw_vars=""
     if echo " $INCLUDE " | grep -q " hardware/virgl "; then
-        # Software rendering via Mesa softpipe (CPU-based, no virgl socket needed).
-        # virpipe requires virgl_test_server to expose a Unix socket inside the chroot's
-        # /tmp — this reliably fails on Android due to mount-namespace isolation for
-        # Termux app processes.  softpipe works without any GPU server.
-        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=softpipe; export LIBGL_ALWAYS_SOFTWARE=1; export MESA_GL_VERSION_OVERRIDE=4.3; export MESA_GLES_VERSION_OVERRIDE=3.2"
+        # virpipe: Mesa connects to virgl_test_server via /tmp/.virgl_test.
+        # The socket is exposed inside the chroot via a bind-mount of Termux tmp
+        # and a symlink (/tmp/.virgl_test → /tmp/host_virgl/.virgl_test).
+        hw_vars="export MESA_NO_ERROR=1; export GALLIUM_DRIVER=virpipe; export MESA_GL_VERSION_OVERRIDE=4.3; export MESA_GLES_VERSION_OVERRIDE=3.2"
         
         # Ensure correct DRM and GPU access for the chroot by fixing host /dev/dri permissions
         if [ -d "${distro_path}/dev/dri" ]; then
@@ -2099,20 +2145,27 @@ chroot_distro_unmount_system_point() {
         return
     fi
     if [ "yes" = "$force" ]; then
-       chroot_distro_force_unmount "$mount_point/" 
+       chroot_distro_force_unmount "$mount_point/"
     fi
-    # no need to check for the success as the caller will take care of that
     print_message info "[unmount] Unmounting system point $mount_point"
-    if ! umount "$mount_point" > /dev/null 2>&1; then
-        print_message warning "Failed to unmount $mount_point"
-    else
+    if umount "$mount_point" > /dev/null 2>&1; then
         print_message info "[unmount] Successfully unmounted $mount_point"
+    elif umount -l "$mount_point" > /dev/null 2>&1; then
+        print_message info "[unmount] Lazy-unmounted $mount_point"
+    else
+        print_message warning "Failed to unmount $mount_point"
     fi
 }
 
 chroot_distro_unmount_system_points() {
     distro_path="$1"
     force="$2"
+    if [ "yes" = "$force" ]; then
+        # Kill all processes inside the chroot before starting per-mount unmount.
+        # This prevents "device or resource busy" on /proc, /dev, /tmp etc.
+        chroot_distro_find_processes_with_open_files "$distro_path" | xargs -r kill -9 > /dev/null 2>&1 || true
+        sleep 1
+    fi
     # Restore tmpfs points first (same priority as mount) for consistent unmounting
     if [ "1" = "$ram_bind_val" ]; then
         for d in /tmp /run /var/tmp /dev/shm; do
@@ -2235,44 +2288,39 @@ chroot_distro_jail() {
     chroot_distro_fix_env "${distro_path}"
     su_command=$(chroot_distro_find_su "$distro_path")
 
+    # Write /etc/profile.d/chd.sh once, shared by both entry paths below.
+    local _conf_dir="$distro_path/root/.chd-init"
+    if [ -f "$_conf_dir/profile.conf" ]; then
+        # shellcheck disable=SC1090
+        . "$_conf_dir/profile.conf"
+    fi
+    local _target_display=":0"
+    case " $INCLUDE " in
+        *" graphics/x11 "*) _target_display=":0" ;;
+        *" graphics/vnc "*) _target_display=":${VNC_DISPLAY:-1}" ;;
+    esac
+    mkdir -p "$distro_path/etc/profile.d"
+    {
+        echo "export DISPLAY=$_target_display"
+        echo "export PULSE_SERVER=tcp:127.0.0.1:${PULSE_PORT:-4713}"
+        echo "export MESA_NO_ERROR=1"
+        echo "export MESA_GL_VERSION_OVERRIDE=4.3"
+        echo "export MESA_GLES_VERSION_OVERRIDE=3.2"
+        case " $INCLUDE " in
+            *" hardware/virgl "*)
+                echo "export GALLIUM_DRIVER=virpipe"
+                ;;
+            *)
+                echo "export GALLIUM_DRIVER=softpipe"
+                echo "export LIBGL_ALWAYS_SOFTWARE=1"
+                ;;
+        esac
+    } > "$distro_path/etc/profile.d/chd.sh"
+    chmod 644 "$distro_path/etc/profile.d/chd.sh"
+
     if [ "" != "$su_command" ]; then
         (
-            # try to ensure that su will do as proper login as possible to ensure consistent environment
             unset PREFIX;
-            
-            # Load profile configuration for dynamic environment settings
-            # Using instance-specific config from the hidden chd-init folder
-            local CONF_DIR="$distro_path/root/.chd-init"
-            if [ -f "$CONF_DIR/profile.conf" ]; then
-                # shellcheck disable=SC1090
-                . "$CONF_DIR/profile.conf"
-            fi
-
-            # Dynamic Display Detection (X11 vs VNC)
-            # Default to X11 (:0) if present, otherwise use VNC_DISPLAY
-            local TARGET_DISPLAY=":0"
-            case " $INCLUDE " in
-                *" graphics/x11 "*) TARGET_DISPLAY=":0" ;;
-                *" graphics/vnc "*) TARGET_DISPLAY=":${VNC_DISPLAY:-1}" ;;
-            esac
-
-            # Automatic graphics and audio environment injection via profile.d
-            # Enhanced for Native Turnip + Zink High-Performance (Termux standard)
-            mkdir -p "$distro_path/etc/profile.d"
-            cat <<EOF > "$distro_path/etc/profile.d/chd.sh"
-export DISPLAY=$TARGET_DISPLAY
-export PULSE_SERVER=tcp:127.0.0.1:4713
-export MESA_NO_ERROR=1
-export GALLIUM_DRIVER=virpipe
-export MESA_GL_VERSION_OVERRIDE=4.3
-export MESA_GLES_VERSION_OVERRIDE=3.2
-export TU_DEBUG=noconform
-export MESA_VK_WSI_PRESENT_MODE=immediate
-export ZINK_DESCRIPTORS=lazy
-export MESA_LOADER_DRIVER_OVERRIDE=virpipe
-EOF
-            chmod 644 "$distro_path/etc/profile.d/chd.sh"
-
             if [ "" != "$command" ]; then
                 # shellcheck disable=SC1007
                 PATH= chroot "$distro_path/" "$su_command" - root -c "$command"
@@ -2287,54 +2335,13 @@ EOF
     print_message warning "Missing 'su' command, can't do a proper login. Please, install 'su'"
     print_message note "As soon as possible to ensure consistent login environment."
 
-    # ensure a sane PATH contents for the shell
     JAIL_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
     JAIL_HOME=/
-    if [ -d "$distro_path/root" ]; then
-        JAIL_HOME=/root
-    fi
+    [ -d "$distro_path/root" ] && JAIL_HOME=/root
 
     (
-        # try to ensure consistent environment
-        unset HISTFILE;
-        unset TMPDIR;
-        unset PREFIX;
-        unset BOOTCLASSPATH;
-        unset SYSTEMSERVERCLASSPATH;
-        unset LD_LIBRARY_PATH;
-        
-        # Load profile configuration for dynamic environment settings
-        local CONF_DIR="$distro_path/root/.chd-init"
-        if [ -f "$CONF_DIR/profile.conf" ]; then
-            # shellcheck disable=SC1090
-            . "$CONF_DIR/profile.conf"
-        fi
-
-        # Dynamic Display Detection (X11 vs VNC)
-        local TARGET_DISPLAY=":0"
-        case " $INCLUDE " in
-            *" graphics/x11 "*) TARGET_DISPLAY=":0" ;;
-            *" graphics/vnc "*) TARGET_DISPLAY=":${VNC_DISPLAY:-1}" ;;
-        esac
-
-        # Automatic graphics and audio environment injection via profile.d
-        # Enhanced for Native Turnip + Zink High-Performance (Termux standard)
-        mkdir -p "$distro_path/etc/profile.d"
-        cat <<EOF > "$distro_path/etc/profile.d/chd.sh"
-export DISPLAY=$TARGET_DISPLAY
-export PULSE_SERVER=tcp:127.0.0.1:4713
-export MESA_NO_ERROR=1
-export GALLIUM_DRIVER=virpipe
-export MESA_GL_VERSION_OVERRIDE=4.3
-export MESA_GLES_VERSION_OVERRIDE=3.2
-export TU_DEBUG=noconform
-export MESA_VK_WSI_PRESENT_MODE=immediate
-export ZINK_DESCRIPTORS=lazy
-export MESA_LOADER_DRIVER_OVERRIDE=virpipe
-EOF
-        chmod 644 "$distro_path/etc/profile.d/chd.sh"
-
+        unset HISTFILE; unset TMPDIR; unset PREFIX;
+        unset BOOTCLASSPATH; unset SYSTEMSERVERCLASSPATH; unset LD_LIBRARY_PATH;
         if [ "" != "$command" ]; then
             SHELL=/bin/sh HOME="$JAIL_HOME" PATH="$JAIL_PATH" chroot "$distro_path/" /bin/sh -lc "$command"
         else
@@ -2585,19 +2592,19 @@ chroot_distro_uninstall() {
     if [ -d "$distro_path" ]; then
         if [ "yes" = "$force" ]; then
             printf "[Clean] Force Process Kill.. "
-            if chroot_distro_force_unmount "$distro_path/" >""$chroot_distro_path/log/chd_uninstall.log 2>&1; then
+            if chroot_distro_force_unmount "$distro_path/" >"$chroot_distro_path/log/chd_uninstall.log" 2>&1; then
                 echo "Success."
             else
                 echo "Failed."
-                cat ""$chroot_distro_path/log/chd_uninstall.log
+                cat "$chroot_distro_path/log/chd_uninstall.log"
             fi
         fi
         printf "[Clean] Unmount System Points.. "
-        if chroot_distro_unmount_system_points "$distro_path" "no" >""$chroot_distro_path/log/chd_uninstall.log 2>&1; then
+        if chroot_distro_unmount_system_points "$distro_path" "no" >"$chroot_distro_path/log/chd_uninstall.log" 2>&1; then
             echo "Success."
         else
             echo "Failed."
-            cat ""$chroot_distro_path/log/chd_uninstall.log
+            cat "$chroot_distro_path/log/chd_uninstall.log"
             return 1
         fi
         
@@ -3123,7 +3130,7 @@ chroot_distro_invalid_parameters() {
 }
 
 chroot_distro_user_check_parameters() {
-    chroot_distro_invalid_parameters "unknonwn parameters"
+    chroot_distro_invalid_parameters "unknown parameters"
 }
 
 chroot_distro_missing_distro() {

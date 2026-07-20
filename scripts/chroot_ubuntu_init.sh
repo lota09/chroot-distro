@@ -125,6 +125,23 @@ if [ -n "${INCLUDE:-}" ]; then
   fi
 fi
 
+# Pre-empt tzdata interactive prompts for every subsequent apt operation.
+# Must be done before the first apt call so packages that pull tzdata as a
+# dependency (dbus-x11, git, etc.) are also covered.
+export DEBIAN_FRONTEND=noninteractive
+TZ_VALUE="${TIMEZONE:-$(cat /etc/timezone 2>/dev/null || true)}"
+[ -z "${TZ_VALUE}" ] && TZ_VALUE="Etc/UTC"
+_tz_area="${TZ_VALUE%%/*}"
+_tz_zone="${TZ_VALUE#*/}"
+# NOTE: stderr intentionally NOT suppressed here (unlike an earlier draft of
+# this fix). This preseed step exists specifically to prevent the tzdata
+# interactive-prompt hang; if debconf-set-selections itself fails, we want
+# that visible in the init log, not swallowed, since a silent failure here
+# would reproduce the exact hang this change is meant to fix with zero clue
+# why. `|| true` still lets the script continue either way.
+printf "tzdata tzdata/Areas select %s\n" "${_tz_area}" | debconf-set-selections || true
+printf "tzdata tzdata/Zones/%s select %s\n" "${_tz_area}" "${_tz_zone}" | debconf-set-selections || true
+
 if [ -z "${CHROOT_USER}" ]; then
   log "ERROR: Missing CHROOT_USER/USER_NAME in config"
   exit 1
@@ -153,20 +170,13 @@ log "=== Init: apt update/upgrade + base tools ==="
 run apt update
 run apt upgrade -y
 run apt install -y coreutils passwd adduser libc-bin
-run apt install -y vim net-tools sudo git dbus-x11 mesa-utils pulseaudio-utils alsa-utils
+run apt install -y net-tools sudo git cron dbus-x11 mesa-utils pulseaudio-utils alsa-utils
 run apt install -y mesa-vulkan-drivers vulkan-tools libegl1 libgl1-mesa-dri
 log_result Success "Init: apt update/upgrade + base tools"
 
-log "=== Init: Timezone configuration ==="# Ensure debconf runs noninteractive and preseed tzdata to avoid prompts
-export DEBIAN_FRONTEND=noninteractive
-# Preseed tzdata to avoid interactive prompts
-TZ_VALUE="${TIMEZONE:-$(cat /etc/timezone 2>/dev/null || true)}"
-[ -z "${TZ_VALUE}" ] && TZ_VALUE="Etc/UTC"
-AREA="${TZ_VALUE%%/*}"
-ZONE="${TZ_VALUE#*/}"
-printf "tzdata tzdata/Areas select %s\n" "${AREA}" | debconf-set-selections || true
-printf "tzdata tzdata/Zones/%s select %s\n" "${AREA}" "${ZONE}" | debconf-set-selections || true
-run apt install -y tzdata
+log "=== Init: Timezone configuration ==="
+# DEBIAN_FRONTEND and tzdata debconf pre-seed were set above before the first apt call.
+# tzdata may already be installed as a dependency; just write the config files.
 printf "%s\n" "${TZ_VALUE}" > /etc/timezone
 if [ -f "/usr/share/zoneinfo/${TZ_VALUE}" ]; then
   ln -sf "/usr/share/zoneinfo/${TZ_VALUE}" /etc/localtime
@@ -216,6 +226,11 @@ if [ "${CHROOT_SSH}" = "true" ]; then
   run sed -i -E 's/#?PasswordAuthentication .*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
   run sed -i -E 's/#?PermitRootLogin .*/PermitRootLogin yes/g' /etc/ssh/sshd_config
   run sed -i -E 's/#?AcceptEnv .*/AcceptEnv LANG/g' /etc/ssh/sshd_config
+  # Ubuntu 24.04 ships sshd_config.d snippets that can override the above.
+  # Drop-in at priority 01 so it takes precedence over cloud-init and similar.
+  mkdir -p /etc/ssh/sshd_config.d
+  printf 'PasswordAuthentication yes\nPermitRootLogin yes\n' \
+      > /etc/ssh/sshd_config.d/01-chd-allow-password.conf
   run mkdir -p /run/sshd /var/run/sshd
   run ssh-keygen -A || true
   if getent passwd sshd >/dev/null 2>&1; then
@@ -358,19 +373,20 @@ log_result Success "Init: Desktop environment"
       log "Termux:X11 mode selected."
       log_result Success "Init: Display Backend Orchestration"
   elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "false" ]; then
-      log "VNC mode selected. Installing TigerVNC..."
-      run apt install -y tigervnc-standalone-server
-      vnc_home="/home/${CHROOT_USER}/.vnc"
-      run mkdir -p "${vnc_home}"
-      log "CMD: write VNC password"
-      echo "${CHROOT_VNC_PASS}" | vncpasswd -f > "${vnc_home}/passwd" || true
-      run chmod 600 "${vnc_home}/passwd"
-      user_group="$(id -gn "${CHROOT_USER}")"
-      run chown -R "${CHROOT_USER}:${user_group}" "${vnc_home}"
-      log_result Success "Init: Display Backend Orchestration"
+      log "WARN: VNC Standalone (no desktop) is no longer supported."
+      log "WARN: No GPU-compatible display surface exists in this mode on Android."
+      log "WARN: Recreate the profile and choose 'X11 + VNC' instead."
+      log_result Ignored "Init: Display Backend Orchestration (VNC Standalone unsupported)"
   elif [ "$HAS_VNC" = "true" ] && [ "$HAS_X11" = "true" ]; then
       log "X11+VNC Mirror mode selected. Installing x11vnc..."
       run apt install -y x11vnc
+      vnc_home="/home/${CHROOT_USER}/.vnc"
+      run mkdir -p "${vnc_home}"
+      log "CMD: write x11vnc VNC password (${CHROOT_VNC_PASS})"
+      x11vnc -storepasswd "${CHROOT_VNC_PASS}" "${vnc_home}/passwd" || true
+      run chmod 600 "${vnc_home}/passwd"
+      user_group="$(id -gn "${CHROOT_USER}" 2>/dev/null || echo "${CHROOT_USER}")"
+      run chown -R "${CHROOT_USER}:${user_group}" "${vnc_home}"
       log_result Success "Init: Display Backend Orchestration"
   else
       log "No Display Backend selected (CLI only mode)."
