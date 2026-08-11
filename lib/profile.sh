@@ -285,7 +285,12 @@ chd_cmd_profile() {
     _adv="$(_chd_yesno 'Configure Advanced Options?' 'false')"
     if [ "$_adv" = "true" ]; then
         if [ "$GRAPHICS" != "none" ]; then
-            VIRGL_ENABLE="$(_chd_yesno 'Enable GPU Acceleration (Turnip/Zink)' "${VIRGL_ENABLE:-true}")"
+            printf '\n[ GPU Acceleration ]  Zink -> Turnip -> Adreno (per-app via `gpuacc`).\n' >&2
+            printf '  If enabled, chd auto-installs the external KGSL Turnip driver\n' >&2
+            printf '  during setup (needs network). If that fails, run `sudo chd-gpu-setup`\n' >&2
+            printf '  after login. Details: GPU_ACCELERATION.md (Doc C, bundled + in repo).\n' >&2
+            printf '  Without GPU, graphics run on CPU (softpipe) - works, just slower.\n' >&2
+            VIRGL_ENABLE="$(_chd_yesno 'Enable GPU Acceleration (Turnip/Zink; auto-installs driver)' "${VIRGL_ENABLE:-true}")"
         fi
         _tdef=1; [ "${TARGET_TYPE:-file}" = "dir" ] && _tdef=2
         TARGET_TYPE="$(_chd_menu 'Target type:' "$_tdef" \

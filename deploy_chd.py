@@ -29,7 +29,7 @@ MODULE_ID = "chroot-distro"
 # NOTE: 'lib' IS required for the reborn build - customize.sh deploys lib/ + scripts/
 # to $CHD_ROOT. Omitting it ships a module whose commands are all "not wired".
 REQUIRED = ["module.prop", "customize.sh", "META-INF", "lib", "scripts", "system"]
-OPTIONAL = ["config.sh", "update.json"]
+OPTIONAL = ["config.sh", "update.json", "docs"]
 
 
 def step(msg): print(f">> {msg}")

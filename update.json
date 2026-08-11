@@ -1,6 +1,6 @@
 {
-  "version": "4.1.8",
-  "versionCode": 29,
+  "version": "4.1.10",
+  "versionCode": 31,
   "zipUrl": "",
-  "changelog": "fix(vnc): drop x11vnc -ncache; its client-side pixel cache made the framebuffer ~11x taller and clients showed the desktop as a thin vertical strip on a black canvas. Verified on-device the desktop now renders full-screen."
+  "changelog": "feat(gpu): auto-install the KGSL Turnip driver during guest init when the profile enables GPU (no manual step); chd-gpu-setup becomes the retry path; fix init's chd_env.sh to softpipe default; wizard/doc updated to reflect auto-setup"
 }
