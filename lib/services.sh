@@ -9,8 +9,12 @@ CHD_TERMUX_TMP="$CHD_TERMUX_PREFIX/tmp"
 CHD_X11_DISPLAY="${X11_DISPLAY:-0}"
 CHD_PULSE_PORT="${PULSE_PORT:-4713}"
 
-# Run a command as the Termux app user, with Termux env + network GIDs, then
-# relabel Termux symlinks (root-via-su poisons their SELinux MCS categories).
+# Run a command as the Termux app user, with Termux env + network GIDs.
+# NOTE: this NO LONGER relabels on every call. `su <uid> -G ...` drops Termux's
+# per-app SELinux MCS categories, so files touched through this path get labeled
+# u:object_r:app_data_file:s0 and become unreadable to Termux itself. The fix is
+# _chd_termux_relabel(), which the caller runs ONCE after all bring-ups finish
+# (was 3x per login). See _chd_termux_relabel for why it must stay per-file.
 host_run_in_termux() {
     _tu=$(stat -c %u "$CHD_TERMUX_DIR" 2>/dev/null)
     if [ -z "$_tu" ] || [ "$_tu" = "0" ] || [ "$_tu" = "root" ]; then
@@ -24,12 +28,28 @@ PATH=$CHD_TERMUX_PREFIX/bin:/system/bin \
 HOME=$CHD_TERMUX_DIR/files/home \
 TMPDIR=$CHD_TERMUX_PREFIX/tmp \
 /system/bin/sh -c \"cd \$HOME && $*\""
-    _rc=$?
-    # SELinux MCS heal: only per-file relabel reliably fixes poisoned symlinks.
-    if command -v restorecon >/dev/null 2>&1; then
-        find "$CHD_TERMUX_DIR" -type l -exec restorecon {} \; >/dev/null 2>&1 || true
-    fi
-    return $_rc
+}
+
+# SELinux MCS heal for the Termux tree. The original verified ON-DEVICE that a
+# plain recursive `restorecon -R` does NOT relabel the poisoned symlinks (no
+# relabeling occurred), while per-file `find -exec restorecon {} \;` reliably
+# does - so we keep the per-file form.
+#
+# But that full-tree per-file sweep was measured at ~56s on-device (1300+
+# symlinks). It is ONLY needed after a bring-up ran `pkg install`, which is what
+# creates/rewrites symlinks in the Termux tree via su and poisons their MCS
+# categories. Steady-state daemon starts create NO tree symlinks (measured: 0
+# symlinks under $PREFIX/tmp), so the sweep fixes nothing on a normal login.
+# We therefore gate it: a host script drops a marker when it installs packages,
+# and we only sweep (and clear the marker) when that marker is present.
+CHD_RELABEL_MARK="$CHD_TERMUX_TMP/.chd_relabel_needed"
+_chd_termux_relabel() {
+    command -v restorecon >/dev/null 2>&1 || return 0
+    _chd_termux_present || return 0
+    [ -f "$CHD_RELABEL_MARK" ] || return 0   # no package change -> nothing poisoned
+    print_message note "Termux packages changed - relabeling SELinux (one-time, may take ~1min)..."
+    find "$CHD_TERMUX_DIR" -type l -exec restorecon {} \; >/dev/null 2>&1 || true
+    rm -f "$CHD_RELABEL_MARK" 2>/dev/null || true
 }
 
 _chd_termux_present() { [ -d "$CHD_TERMUX_DIR" ]; }
@@ -139,20 +159,35 @@ chd_services_up() {
     _hlog="$CHD_ROOT/log/host_services.log"; : > "$_hlog"
 
     # 0) self-heal guest-side artifacts init created (env/gpuacc/proc-smi/xstartup)
+    #    (guest-only, quick - keep first and sequential).
     if command -v chd_self_heal >/dev/null 2>&1; then
         chd_self_heal "$_name" "$_p"
     fi
 
-    # 1) host audio
-    [ "$_pulse" = "true" ] && chd_host_pulse "$_hlog"
-    # 2) host X11 bindings (needed by desktop + vnc mirror)
+    # 1-3) HOST bring-ups run CONCURRENTLY. pulse, x11 and virgl are independent
+    #      (separate daemons/sockets), so we launch each in its own subshell -
+    #      isolated variables + a service tag so the interleaved console logs
+    #      stay readable - then barrier-wait them all. This replaces the old
+    #      strictly-sequential pulse -> x11 -> virgl chain.
+    _pp=""; _xp=""; _vp=""
+    if [ "$_pulse" = "true" ]; then
+        ( CHD_SVC_TAG=pulse chd_host_pulse "$_hlog" ) & _pp=$!
+    fi
     if [ "$_has_x11" = "true" ]; then
-        chd_host_x11 "$_p" "$_hlog" || print_message warning "X11 host bring-up failed."
+        ( CHD_SVC_TAG=x11 chd_host_x11 "$_p" "$_hlog" ) & _xp=$!
     fi
-    # 3) host GPU (only if the profile asked for it)
     if [ "$_virgl" = "true" ]; then
-        chd_host_virgl "$_p" "$_hlog" || true   # non-fatal: desktop falls back to softpipe
+        ( CHD_SVC_TAG=virgl chd_host_virgl "$_p" "$_hlog" ) & _vp=$!
     fi
+    # Barrier: wait for every launched host bring-up before continuing.
+    for _j in $_pp $_xp $_vp; do
+        [ -n "$_j" ] || continue
+        wait "$_j" 2>/dev/null || true
+    done
+
+    # SELinux relabel ONCE, after all Termux-context (su) work is done.
+    _chd_termux_relabel
+
     # 4) guest service manager (systemctl replacement). Absorbs the old "startup".
     if command -v chd_sv_ensure >/dev/null 2>&1; then
         chd_sv_reload "$_p" 2>/dev/null || true

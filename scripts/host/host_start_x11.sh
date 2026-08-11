@@ -37,6 +37,8 @@ else
         fi
         echo "Installation complete." >> "$LOGFILE"
         INSTALL_PERFORMED=1
+        # Signal caller to run the one-time Termux SELinux relabel.
+        : > "$TERMUX_TMP/.chd_relabel_needed" 2>/dev/null || true
     fi
 
     echo "Attempting to start Termux:X11..." >> "$LOGFILE"

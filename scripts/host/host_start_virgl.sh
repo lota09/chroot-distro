@@ -66,6 +66,8 @@ if [ "$_need" = 1 ]; then
     dpkg --configure -a >> "$LOGFILE" 2>&1 || true
     apt -f install -y </dev/null >> "$LOGFILE" 2>&1 || true
     echo "[virgl] Package install/repair complete." >> "$LOGFILE"
+    # Signal caller to run the one-time Termux SELinux relabel.
+    : > "$TERMUX_TMP/.chd_relabel_needed" 2>/dev/null || true
 fi
 if ! command -v virgl_test_server >/dev/null 2>&1; then
     echo "[virgl] ERROR: virgl_test_server still not available after install." >> "$LOGFILE"

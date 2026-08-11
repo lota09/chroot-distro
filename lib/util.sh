@@ -3,7 +3,7 @@
 : "${CHD_ROOT:=/data/local/chroot-distro}"
 : "${CHD_LIB:=$CHD_ROOT/lib}"
 : "${CHD_SCRIPTS:=$CHD_ROOT/scripts}"
-CHD_VERSION="4.1.2"
+CHD_VERSION="4.1.7"
 
 # Reserved top-level names under CHD_ROOT that are NOT instances.
 CHD_RESERVED="lib scripts log .config .profile .rootfs .backup .cache _to_delete"
@@ -14,12 +14,28 @@ CHD_RESERVED="lib scripts log .config .profile .rootfs .backup .cache _to_delete
 # toybox has no wget. The original defined tar/wget/sort wrappers pointing at the
 # Magisk busybox; without them, .tar.xz extraction and rootfs downloads fail.
 chd_setup_busybox() {
+    # chroot wrapper FIRST (independent of busybox): jail runs `PATH= chroot ...`,
+    # and with an emptied PATH the shell cannot find the `chroot` command
+    # ("chroot: inaccessible or not found"). A function bypasses PATH lookup and
+    # calls chroot by absolute path - exactly what the original did.
+    _cr="$(command -v chroot 2>/dev/null)"
+    [ -z "$_cr" ] && [ -x /system/bin/chroot ] && _cr=/system/bin/chroot
+    [ -z "$_cr" ] && [ -x /system/xbin/chroot ] && _cr=/system/xbin/chroot
+    if [ -n "$_cr" ]; then
+        CHD_CHROOT="$_cr"
+        chroot() { "$CHD_CHROOT" "$@"; }
+    fi
+
     CHD_BUSYBOX="$(command -v busybox 2>/dev/null)"
     [ -n "${CHROOT_DISTRO_BUSYBOX:-}" ] && CHD_BUSYBOX="$CHROOT_DISTRO_BUSYBOX"
     if [ -z "$CHD_BUSYBOX" ]; then
         for _bp in /data/adb/magisk/busybox /data/adb/ksu/bin/busybox                    /data/adb/ap/bin/busybox /data/adb/modules/busybox-ndk/system/*/busybox; do
             [ -f "$_bp" ] && { CHD_BUSYBOX="$_bp"; break; }
         done
+    fi
+    if [ -z "${CHD_CHROOT:-}" ] && [ -n "$CHD_BUSYBOX" ]; then
+        CHD_CHROOT="$CHD_BUSYBOX"
+        chroot() { "$CHD_BUSYBOX" chroot "$@"; }
     fi
     [ -n "$CHD_BUSYBOX" ] || { CHD_BUSYBOX=""; return 1; }
     # tar: only override if the current tar lacks xz (-J) support.
@@ -36,11 +52,15 @@ chd_setup_busybox() {
 
 print_message() {
     _lvl="$1"; { [ "$#" -gt 0 ] && shift; } || true
+    # Optional per-service tag so concurrently-running bring-ups (pulse/x11/virgl)
+    # stay readable when their logs interleave on the console.
+    _tag=""
+    [ -n "${CHD_SVC_TAG:-}" ] && _tag="[$CHD_SVC_TAG]"
     case "$_lvl" in
-        error)        printf '[chd][ERROR] %s\n' "$*" >&2 ;;
-        warning|warn) printf '[chd][warn] %s\n'  "$*" >&2 ;;
-        note)         printf '[chd][note] %s\n'  "$*" >&2 ;;
-        *)            printf '[chd] %s\n'        "$*" >&2 ;;
+        error)        printf '[chroot-distro]%s[ERROR] %s\n' "$_tag" "$*" >&2 ;;
+        warning|warn) printf '[chroot-distro]%s[warn] %s\n'  "$_tag" "$*" >&2 ;;
+        note)         printf '[chroot-distro]%s[note] %s\n'  "$_tag" "$*" >&2 ;;
+        *)            printf '[chroot-distro]%s %s\n'        "$_tag" "$*" >&2 ;;
     esac
 }
 
