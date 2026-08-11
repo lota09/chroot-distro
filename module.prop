@@ -1,6 +1,6 @@
 id=chroot-distro
 name=chroot-distro (rb2)
-version=4.1.7
-versionCode=28
+version=4.1.8
+versionCode=29
 author=@lota09
 description=Run GNU/Linux distros in a chroot on Android. Modular, image-mode, supervisord.

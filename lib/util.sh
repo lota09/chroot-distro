@@ -3,7 +3,7 @@
 : "${CHD_ROOT:=/data/local/chroot-distro}"
 : "${CHD_LIB:=$CHD_ROOT/lib}"
 : "${CHD_SCRIPTS:=$CHD_ROOT/scripts}"
-CHD_VERSION="4.1.7"
+CHD_VERSION="4.1.8"
 
 # Reserved top-level names under CHD_ROOT that are NOT instances.
 CHD_RESERVED="lib scripts log .config .profile .rootfs .backup .cache _to_delete"
