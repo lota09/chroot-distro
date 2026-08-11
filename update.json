@@ -1,6 +1,6 @@
 {
-  "version": "3.0.11",
-  "versionCode": 17,
-  "zipUrl": "https://github.com/lota09/chroot-distro/releases/download/v3.0.11/chroot-distro.zip",
-  "changelog": "https://raw.githubusercontent.com/lota09/chroot-distro/main/CHANGELOG.md"
+  "version": "4.1.7",
+  "versionCode": 28,
+  "zipUrl": "",
+  "changelog": "fix(audio): start pulseaudio with /system/lib64 prepended to LD_LIBRARY_PATH so its system audio chain (libOpenSLES->libgui->libEGL) links against system libEGL instead of Mesa's; resolves the eglDestroySyncKHR link crash that kept the pulse TCP port from opening"
 }
