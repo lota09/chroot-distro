@@ -1,6 +1,6 @@
 {
-  "version": "3.1.7",
-  "versionCode": 18,
-  "zipUrl": "https://github.com/lota09/chroot-distro/releases/download/v3.1.5/chroot-distro.zip",
-  "changelog": "https://raw.githubusercontent.com/lota09/chroot-distro/main/CHANGELOG.md"
+  "version": "4.1.2",
+  "versionCode": 23,
+  "zipUrl": "",
+  "changelog": "fix: TMPDIR leak into chroot broke apt postinst (ca-certificates/dictionaries-common); install now saves full log to log/install-*.log"
 }
