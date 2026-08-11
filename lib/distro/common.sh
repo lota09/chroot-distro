@@ -163,8 +163,13 @@ chd_register_services() {
     if [ "$_rs_vnc" = "true" ]; then
         _rs_home="$(_chd_user_home "$_rs_p" "$_rs_user")"
         _rs_venv="HOME=\"$_rs_home\",USER=\"$_rs_user\",LOGNAME=\"$_rs_user\""
+        # NOTE: no -ncache. x11vnc's client-side pixel cache makes the advertised
+        # framebuffer ~(1+N)x TALLER than the real screen (the lower region is a
+        # scratch cache). Many VNC clients render that as a mostly-black canvas
+        # with the desktop squeezed into a thin vertical strip. Verified on-device
+        # that dropping -ncache restores a correct full-screen desktop.
         chd_sv_add_program "$_rs_p" x11vnc \
-            "/usr/bin/x11vnc -display :0 -noshm -noxdamage -nowf -nowcr -ncache 10 -rfbauth $_rs_home/.vnc/passwd -rfbport 5900 -xkb -shared -forever" \
+            "/usr/bin/x11vnc -display :0 -noshm -noxdamage -nowf -nowcr -rfbauth $_rs_home/.vnc/passwd -rfbport 5900 -xkb -shared -forever" \
             "$_rs_user" "$_rs_venv" true
     fi
     print_message info "supervisord programs registered (ssh=$_rs_ssh x11=$_rs_x11 vnc=$_rs_vnc desktop=$_rs_desktop)."
