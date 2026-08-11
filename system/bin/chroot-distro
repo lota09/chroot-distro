@@ -149,6 +149,27 @@ PATH=$TERMUX_DIR/files/usr/bin:/system/bin \
 HOME=$TERMUX_DIR/files/home \
 TMPDIR=$TERMUX_DIR/files/usr/tmp \
 /system/bin/sh -c \"cd \$HOME && $*\""
+    local _rc=$?
+
+    # WORKAROUND: `su <uid> -G ... -c ...` switches UID/GID correctly but does
+    # NOT reliably carry over Termux's per-app SELinux MCS category set
+    # (files created/touched through this path end up labeled
+    # u:object_r:app_data_file:s0 instead of the app's real
+    # ...:s0:cXX,cXX,cXX,cXX, making them unreadable to Termux's own process
+    # afterwards — EACCES on stat/readlink, dynamic linker reporting
+    # "library not found", etc. — even though ownership/mode look normal).
+    # We're already root here, so relabel immediately after every call.
+    #
+    # NOTE: a plain recursive `restorecon -R "$TERMUX_DIR"` was tested
+    # on-device and did NOT reliably fix affected symlinks (no relabeling
+    # occurred even though broken files remained). Only per-file invocation
+    # via `find -exec` reliably relabels every symlink, so that's what we
+    # use here despite the extra overhead of spawning restorecon per file.
+    if command -v restorecon >/dev/null 2>&1; then
+        find "$TERMUX_DIR" -type l -exec restorecon {} \; >/dev/null 2>&1 || true
+    fi
+
+    return $_rc
 }
 
 architecture=$(uname -m)
@@ -2319,6 +2340,41 @@ chroot_distro_jail() {
         esac
     } > "$distro_path/etc/profile.d/chd.sh"
     chmod 644 "$distro_path/etc/profile.d/chd.sh"
+
+    # gpuacc: per-command GPU(virpipe) prefix, independent of whatever the
+    # current shell inherited (desktop session env is deliberately softpipe;
+    # see comment above chroot_distro_start_x11 / hw_vars). Only useful when
+    # hardware/virgl is actually included; (re)written every jail entry so it
+    # self-heals if deleted and always matches the vars chd.sh itself uses.
+    case " $INCLUDE " in
+        *" hardware/virgl "*)
+            mkdir -p "$distro_path/usr/local/bin"
+            {
+                echo "#!/bin/sh"
+                echo "# gpuacc - GPU(virpipe) 가속 접두사. 사용: gpuacc glmark2"
+                echo "# chroot_distro_jail()이 hardware/virgl 포함 시 매번 재생성한다."
+                echo "export MESA_NO_ERROR=1"
+                echo "export MESA_GL_VERSION_OVERRIDE=4.3"
+                echo "export MESA_GLES_VERSION_OVERRIDE=3.2"
+                echo "export GALLIUM_DRIVER=virpipe"
+                echo 'if [ "$#" -eq 0 ]; then echo "usage: gpuacc <command> [args...]" >&2; exit 1; fi'
+                echo 'exec "$@"'
+            } > "$distro_path/usr/local/bin/gpuacc"
+            chmod 755 "$distro_path/usr/local/bin/gpuacc"
+            ;;
+    esac
+
+    # proc-smi: host의 /system/bin/proc-smi(Magisk overlay)를 distro 안으로 복사해
+    # chroot에서도 `proc-smi`로 쓸 수 있게 한다. shebang만 /bin/sh로 바꾼다
+    # (chroot엔 /system/bin/sh가 없음). GPU 섹션은 /sys/class/kgsl 마운트가 있어야
+    # 나오고, CPU/메모리/온도는 항상 동작한다. hardware/virgl 여부와 무관하며, 매
+    # jail 진입마다 다시 써서 host 버전과 동기화되고 삭제돼도 자가복구한다.
+    if [ -f /system/bin/proc-smi ]; then
+        mkdir -p "$distro_path/usr/local/bin"
+        { echo "#!/bin/sh"; tail -n +2 /system/bin/proc-smi; } \
+            > "$distro_path/usr/local/bin/proc-smi" 2>/dev/null \
+            && chmod 755 "$distro_path/usr/local/bin/proc-smi"
+    fi
 
     if [ "" != "$su_command" ]; then
         (

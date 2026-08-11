@@ -167,8 +167,23 @@ usermod -G 3003 -a root
 log_result Success "Init: Network + Android group mappings"
 
 log "=== Init: apt update/upgrade + base tools ==="
-run apt update
-run apt upgrade -y
+run apt update || true
+# Hardening against Ubuntu-ports mirror rotation: a package version still in our
+# cached index can vanish from the pool mid-run (404). Under 'set -e' that would
+# abort the ENTIRE init. snapd is the usual culprit (rotates often) AND we purge
+# it later anyway - so remove and block it UP FRONT so 'upgrade' never fetches
+# it. Then upgrade with --fix-missing and never let a transient fetch error kill
+# init (a failed non-essential upgrade must not stop the whole install).
+mkdir -p /etc/apt/preferences.d
+printf 'Package: snapd\nPin: release a=*\nPin-Priority: -10\n' > /etc/apt/preferences.d/nosnap.pref
+apt-get purge -y snapd firefox >/dev/null 2>&1 || true
+apt-get autoremove -y >/dev/null 2>&1 || true
+run apt update || true
+if ! apt upgrade -y --fix-missing; then
+  log "WARN: apt upgrade incomplete (transient mirror 404?) - refreshing index and retrying once"
+  run apt update || true
+  apt upgrade -y --fix-missing || log "WARN: apt upgrade still incomplete; continuing anyway (base tools install below fetches the essentials)"
+fi
 run apt install -y coreutils passwd adduser libc-bin
 run apt install -y net-tools sudo git cron dbus-x11 mesa-utils pulseaudio-utils alsa-utils
 run apt install -y mesa-vulkan-drivers vulkan-tools libegl1 libgl1-mesa-dri
