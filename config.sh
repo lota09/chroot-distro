@@ -2,7 +2,8 @@ MODID=chroot-distro
 AUTOMOUNT=true
 PROPFILE=false
 POSTFSDATA=false
-LATESTARTSERVICE=false
+# We ship service.sh (late_start): autoboot AUTOBOOT=true instances after boot.
+LATESTARTSERVICE=true
 
 print_modname() { ui_print "chd (reborn)"; }
 REPLACE=""

@@ -112,7 +112,7 @@ chd_profile_load() {
     # which would make unmount detach the wrong loop device or skip .img deletion).
     DISTRIB=""; SUITE=""; USER_NAME=""; USER_PASSWORD=""; GRAPHICS=""; DESKTOP=""
     VIRGL_ENABLE=""; DESKTOP_BACKEND=""; SSH_ENABLE=""; PULSE_ENABLE=""; INCLUDE=""; ARCH=""
-    TARGET_TYPE=""; TARGET_PATH=""; DISK_SIZE=""; FS_TYPE=""
+    TARGET_TYPE=""; TARGET_PATH=""; DISK_SIZE=""; FS_TYPE=""; AUTOBOOT=""
     VNC_DISPLAY=""; VNC_WIDTH=""; VNC_HEIGHT=""; VNC_PASSWORD=""
     _conf="$(chd_instance_conf "$1")"
     [ -f "$_conf" ] || return 1
@@ -121,6 +121,7 @@ chd_profile_load() {
     : "${DISTRIB:=$1}"
     : "${SUITE:=}"
     : "${TARGET_TYPE:=file}"
+    : "${AUTOBOOT:=false}"
     return 0
 }
 
@@ -128,6 +129,7 @@ _chd_profile_write() {
     mkdir -p "$(dirname "$1")"
     cat > "$1" <<CONF
 ARCH="$ARCH"
+AUTOBOOT="${AUTOBOOT:-false}"
 DESKTOP="$DESKTOP"
 DESKTOP_BACKEND="$DESKTOP_BACKEND"
 DISK_SIZE="$DISK_SIZE"
@@ -194,7 +196,7 @@ chd_cmd_profile() {
         USER_NAME="${USER_NAME:-user}"; USER_PASSWORD="changeme"
         VIRGL_ENABLE="false"; [ "$GRAPHICS" != "none" ] && VIRGL_ENABLE="true"
         DESKTOP_BACKEND=""; [ "$GRAPHICS" != "none" ] && DESKTOP_BACKEND="softpipe"
-        SSH_ENABLE="true"; PULSE_ENABLE="true"
+        SSH_ENABLE="true"; PULSE_ENABLE="true"; AUTOBOOT="${AUTOBOOT:-false}"
         TARGET_TYPE="file"; TARGET_PATH="/sdcard/$_pname.img"
         DISK_SIZE="131072"; FS_TYPE="ext4"; ARCH="$CHD_ARCH"
         _chd_profile_include
@@ -212,7 +214,7 @@ chd_cmd_profile() {
         # (index 1 = debian), not whatever leaked from a prior operation.
         DISTRIB=""; SUITE=""; GRAPHICS=""; DESKTOP=""; USER_NAME=""
         TARGET_TYPE=""; TARGET_PATH=""; DISK_SIZE=""; FS_TYPE=""; ARCH=""
-        SSH_ENABLE=""; PULSE_ENABLE=""; VIRGL_ENABLE=""; DESKTOP_BACKEND=""
+        SSH_ENABLE=""; PULSE_ENABLE=""; VIRGL_ENABLE=""; DESKTOP_BACKEND=""; AUTOBOOT=""
     fi
 
     _ddef="$(_chd_index_of "${DISTRIB:-}" $CHD_DISTRO_MENU)"
@@ -281,6 +283,11 @@ chd_cmd_profile() {
     SSH_ENABLE="$(_chd_yesno 'Enable SSH' "${SSH_ENABLE:-true}")"
     printf '\n[ PulseAudio ]  route chroot audio to Android\n' >&2
     PULSE_ENABLE="$(_chd_yesno 'Enable PulseAudio' "${PULSE_ENABLE:-true}")"
+
+    printf '\n[ Auto-start on boot ]  bring this instance up automatically after the\n' >&2
+    printf '  phone reboots (mount + services incl. sshd) - no need to run\n' >&2
+    printf '  `chd login` by hand; just ssh in. Needs the chd Magisk module active.\n' >&2
+    AUTOBOOT="$(_chd_yesno 'Auto-start on boot' "${AUTOBOOT:-false}")"
 
     _adv="$(_chd_yesno 'Configure Advanced Options?' 'false')"
     if [ "$_adv" = "true" ]; then

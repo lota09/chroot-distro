@@ -424,14 +424,16 @@ chd_cmd_list() {
         # source of metadata: instance conf if installed, else template.
         _c="$(chd_instance_conf "$n")"
         [ -f "$_c" ] || _c="$CHD_ROOT/.profile/$n.conf"
-        _di=""; _su=""; _tt=""; _tp=""
+        _di=""; _su=""; _tt=""; _tp=""; _ab=""
         if [ -f "$_c" ]; then
             _di=$(sed -n 's/^DISTRIB="\(.*\)"/\1/p' "$_c")
             _su=$(sed -n 's/^SUITE="\(.*\)"/\1/p'   "$_c")
             _tt=$(sed -n 's/^TARGET_TYPE="\(.*\)"/\1/p' "$_c")
             _tp=$(sed -n 's/^TARGET_PATH="\(.*\)"/\1/p' "$_c")
+            _ab=$(sed -n 's/^AUTOBOOT="\(.*\)"/\1/p' "$_c")
         fi
         _dl="${_di:-?}${_su:+/$_su}"
+        _abtag=""; [ "$_ab" = "true" ] && _abtag=" (autoboot)"
 
         # Installed states:
         #   rootfs visible (dir-mode, or file-mode currently mounted)   -> installed
@@ -445,7 +447,7 @@ chd_cmd_list() {
                 _st="[installed · dir]"
             fi
             [ -f "$CHD_ROOT/.profile/$n.conf" ] || _st="$_st (no profile)"
-            printf '%s %-14s %-22s %s\n' "$_br" "$n" "$_dl" "$_st"
+            printf '%s %-14s %-22s %s%s\n' "$_br" "$n" "$_dl" "$_st" "$_abtag"
             if command -v chd_sv_running >/dev/null 2>&1 && chd_sv_running "$CHD_ROOT/$n" 2>/dev/null; then
                 _svs=$(ls "$CHD_ROOT/$n/etc/supervisor/conf.d" 2>/dev/null | sed 's/\.conf$//' | tr '\n' ' ')
                 [ -n "$_svs" ] && printf '%s └─ services: %s(supervisord up)\n' "$_sp" "$_svs"

@@ -44,6 +44,22 @@ chd uninstall ubuntu_noble   # 인스턴스+img 삭제 (템플릿은 유지, 마
 chd rename old new
 ```
 
+## 4b. 부팅 자동 기동 (autoboot)
+
+프로파일 위저드의 "Auto-start on boot"를 y로 두면(또는 `.config/<name>.conf`에
+`AUTOBOOT="true"`) 폰 재부팅 후 `chd login` 없이 자동으로 마운트+서비스가 올라와
+바로 ssh로 chroot 접속 가능. 모듈의 `service.sh`(Magisk late_start)가
+`chd command <name> true`로 무대화(mount+supervisord/sshd) 기동한다.
+
+```
+chd list                     # [installed ...] (autoboot) 표시 확인
+# 재부팅 후:
+cat /data/local/chroot-distro/log/autoboot.log   # 부팅 기동 로그
+ssh user@<기기IP>            # chd login 없이 바로 접속
+```
+전제: chd Magisk 모듈 활성, 인스턴스 install 성공, SSH 활성 프로파일. AUTOBOOT=true인
+인스턴스가 하나도 없으면 service.sh는 즉시 종료(no-op).
+
 ## 5. 알려진 실기 리스크
 
 - /sdcard의 .img 루프마운트가 커널/sdcardfs 제약으로 실패할 수 있음 → 그 경우

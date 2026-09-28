@@ -28,6 +28,14 @@ find "$CHD_ROOT/lib" "$CHD_ROOT/scripts" -type f 2>/dev/null | while read -r f; 
 done
 ui_print "  [OK] lib/ + scripts/ + docs/ deployed"
 
+# 1b) Normalise line endings on the module-root boot hooks (service.sh /
+#     post-fs-data.sh). Magisk runs these via `sh`, but a stray CRLF (from a
+#     Windows edit) still breaks the commands inside. lib/scripts are handled
+#     above; the root hooks are not, so strip CR here.
+for hook in service.sh post-fs-data.sh; do
+    [ -f "$MODPATH/$hook" ] && sed -i 's/\r$//' "$MODPATH/$hook"
+done
+
 # 2) Permissions: default recursive, then re-mark EVERY binary in system/bin as
 #    executable (set_perm_recursive makes files 0644; loop, don't hardcode names).
 ui_print "- Finalizing permissions..."
