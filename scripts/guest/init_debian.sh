@@ -106,6 +106,44 @@ run apt-get install -y mesa-vulkan-drivers vulkan-tools libegl1 libgl1-mesa-dri 
 run apt-get install -y supervisor || result Warn "supervisor"
 result Success "apt base tools"
 
+# --- GPU: KGSL Turnip driver (auto-setup when the profile enabled GPU) -------
+# Stock mesa Turnip is DRM-only and can't drive this Adreno/KGSL GPU. When the
+# profile chose GPU, install the KGSL-patched Turnip so `gpuacc <app>` gets real
+# hardware GL (Zink -> Turnip -> Adreno). Best-effort: needs network; on failure
+# the guest still works on software, and `chd-gpu-setup` retries after login.
+# Full guide: /usr/local/share/chd/GPU_ACCELERATION.md (Doc C).
+if [ "${VIRGL_ENABLE:-false}" = "true" ] && [ -e /dev/kgsl-3d0 ]; then
+    log "=== Init: GPU (KGSL Turnip) auto-setup ==="
+    _kgsl_ok=0; _deb=/tmp/mesa-vulkan-kgsl.deb
+    if [ ! -s "$_deb" ]; then
+        command -v gdown >/dev/null 2>&1 || {
+            apt-get install -y --no-install-recommends python3-pip >/dev/null 2>&1
+            pip3 install --break-system-packages gdown >/dev/null 2>&1 || true
+        }
+        _gd="$(command -v gdown 2>/dev/null || echo /root/.local/bin/gdown)"
+        "$_gd" 1f4pLvjDFcBPhViXGIFoRE3Xc8HWoiqG- -O "$_deb" >/dev/null 2>&1 || true
+    fi
+    if [ -s "$_deb" ]; then
+        apt-get install -y libllvm15t64 >/dev/null 2>&1 || apt-get install -y libllvm15 >/dev/null 2>&1 || true
+        dpkg -i "$_deb" >/dev/null 2>&1
+        apt-get install -y libllvm15t64 >/dev/null 2>&1 || true
+        dpkg --configure -a >/dev/null 2>&1 || true
+        apt-mark hold mesa-vulkan-drivers libllvm15t64 >/dev/null 2>&1 || true
+        if command -v vulkaninfo >/dev/null 2>&1 && \
+           MESA_LOADER_DRIVER_OVERRIDE=zink TU_DEBUG=noconform vulkaninfo 2>/dev/null | grep -qi turnip; then
+            _kgsl_ok=1
+        fi
+    fi
+    if [ "$_kgsl_ok" = 1 ]; then
+        log "GPU: KGSL Turnip active - 'gpuacc <app>' will use the Adreno GPU."
+        result Success "gpu turnip"
+    else
+        log "GPU: auto-setup FAILED (no network/download blocked). After login run:"
+        log "     sudo chd-gpu-setup   (details: /usr/local/share/chd/GPU_ACCELERATION.md)"
+        result Warn "gpu turnip (retry: chd-gpu-setup)"
+    fi
+fi
+
 # --- user + groups ----------------------------------------------------------
 log "=== Init: user + groups ==="
 getent group storage >/dev/null 2>&1 || groupadd storage 2>/dev/null || true
@@ -208,8 +246,11 @@ export DISPLAY=${RESOLVED_DISPLAY}
 export MESA_NO_ERROR=1
 export MESA_GL_VERSION_OVERRIDE=4.3
 export MESA_GLES_VERSION_OVERRIDE=3.2
-# Individual GL apps: use GPU if the virgl socket is present, else software.
-if [ -S /tmp/.virgl_test ]; then export GALLIUM_DRIVER=virpipe; else export GALLIUM_DRIVER=softpipe; export LIBGL_ALWAYS_SOFTWARE=1; fi
+# Software (softpipe) is the safe default for the shell and desktop. Real GPU is
+# per-app: run 'gpuacc <app>' (Zink -> Turnip). If GPU wasn't auto-installed,
+# run 'sudo chd-gpu-setup' once. See /usr/local/share/chd/GPU_ACCELERATION.md.
+export GALLIUM_DRIVER=softpipe
+export LIBGL_ALWAYS_SOFTWARE=1
 EOF
 chmod 644 /etc/profile.d/chd_env.sh
 result Success "env"

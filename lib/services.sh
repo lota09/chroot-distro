@@ -169,18 +169,19 @@ chd_services_up() {
     #      isolated variables + a service tag so the interleaved console logs
     #      stay readable - then barrier-wait them all. This replaces the old
     #      strictly-sequential pulse -> x11 -> virgl chain.
-    _pp=""; _xp=""; _vp=""
+    # NOTE: GPU no longer uses the virgl/virpipe host server. On this Adreno/KGSL
+    # device, GL accel is the Direct-Turnip path (guest Zink -> Turnip -> /dev/kgsl),
+    # set up per-app via `gpuacc` after `chd-gpu-setup` (see GPU_ACCELERATION.md).
+    # So we do NOT start virgl_test_server here; only pulse + x11 bring up.
+    _pp=""; _xp=""
     if [ "$_pulse" = "true" ]; then
         ( CHD_SVC_TAG=pulse chd_host_pulse "$_hlog" ) & _pp=$!
     fi
     if [ "$_has_x11" = "true" ]; then
         ( CHD_SVC_TAG=x11 chd_host_x11 "$_p" "$_hlog" ) & _xp=$!
     fi
-    if [ "$_virgl" = "true" ]; then
-        ( CHD_SVC_TAG=virgl chd_host_virgl "$_p" "$_hlog" ) & _vp=$!
-    fi
     # Barrier: wait for every launched host bring-up before continuing.
-    for _j in $_pp $_xp $_vp; do
+    for _j in $_pp $_xp; do
         [ -n "$_j" ] || continue
         wait "$_j" 2>/dev/null || true
     done

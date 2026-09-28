@@ -108,16 +108,74 @@ fi
 $_xscmd
 XEOF
     chmod 0755 "$_xsp$_xshome/.xstartup_native"
-    # gpuacc helper: force-GPU prefix for individual apps.
-    mkdir -p "$_xsp/usr/local/bin"
+    # --- GPU helpers (Direct Turnip path: Zink -> Turnip -> Adreno) ---------
+    # The device is an Adreno/KGSL GPU. Its GL accel is Mesa Zink translating to
+    # the Turnip Vulkan driver, which talks to /dev/kgsl-3d0 directly - no virgl,
+    # no host server. It needs the KGSL-patched Turnip driver in the guest, which
+    # ships separately (see docs/GPU_ACCELERATION.md); `chd-gpu-setup` installs it.
+    mkdir -p "$_xsp/usr/local/bin" "$_xsp/usr/local/share/chd"
+    # Ship Doc C into the guest so the installer can point at it on failure.
+    [ -f "$CHD_ROOT/docs/GPU_ACCELERATION.md" ] && \
+        cp "$CHD_ROOT/docs/GPU_ACCELERATION.md" "$_xsp/usr/local/share/chd/GPU_ACCELERATION.md" 2>/dev/null || true
+    # gpuacc: run ONE app on the GPU. Software is the default elsewhere, so this
+    # unsets the software-forcing vars and selects the Turnip Vulkan backend.
     cat > "$_xsp/usr/local/bin/gpuacc" <<'GEOF'
 #!/bin/sh
-# gpuacc <cmd> - run a command with GPU (virpipe) forced.
-export MESA_NO_ERROR=1 MESA_GL_VERSION_OVERRIDE=4.3 MESA_GLES_VERSION_OVERRIDE=3.2 GALLIUM_DRIVER=virpipe
-[ "$#" -eq 0 ] && { echo "usage: gpuacc <command> [args...]" >&2; exit 1; }
+# gpuacc <cmd> - run a command with GPU (Zink -> Turnip -> Adreno) forced.
+# Requires the KGSL Turnip driver: run `sudo chd-gpu-setup` once. Without it,
+# apps fall back to software (softpipe).
+export MESA_NO_ERROR=1 MESA_LOADER_DRIVER_OVERRIDE=zink TU_DEBUG=noconform
+unset LIBGL_ALWAYS_SOFTWARE GALLIUM_DRIVER
+[ "$#" -eq 0 ] && { echo "usage: gpuacc <command> [args...]  (e.g. gpuacc glmark2)" >&2; exit 1; }
 exec "$@"
 GEOF
     chmod 0755 "$_xsp/usr/local/bin/gpuacc"
+    # chd-gpu-setup: one-time KGSL Turnip installer. (B) auto-download via gdown,
+    # (C) print the manual doc if that fails.
+    cat > "$_xsp/usr/local/bin/chd-gpu-setup" <<'SEOF'
+#!/bin/sh
+# chd-gpu-setup - install the KGSL Turnip Vulkan driver so `gpuacc <app>` gets
+# real GPU (Zink -> Turnip -> Adreno). Full guide: GPU_ACCELERATION.md (Doc C).
+DEB_ID="1f4pLvjDFcBPhViXGIFoRE3Xc8HWoiqG-"
+DEB="/tmp/mesa-vulkan-kgsl.deb"
+DOC="/usr/local/share/chd/GPU_ACCELERATION.md"
+say(){ echo "[chd-gpu-setup] $*"; }
+[ "$(id -u)" = 0 ] || { say "run as root:  sudo chd-gpu-setup"; exit 1; }
+[ -e /dev/kgsl-3d0 ] || say "warning: /dev/kgsl-3d0 not visible in guest - GPU may not work"
+# (B) automatic download via gdown (Google Drive)
+if [ ! -s "$DEB" ]; then
+    say "downloading KGSL Turnip driver (gdown)..."
+    command -v gdown >/dev/null 2>&1 || {
+        command -v pip3 >/dev/null 2>&1 || apt-get install -y python3-pip >/dev/null 2>&1
+        pip3 install --break-system-packages gdown >/dev/null 2>&1 || true
+    }
+    GDOWN="$(command -v gdown 2>/dev/null || echo "$HOME/.local/bin/gdown")"
+    "$GDOWN" "$DEB_ID" -O "$DEB" >/dev/null 2>&1 || true
+fi
+# (C) fall back to the manual doc if the download did not work
+if [ ! -s "$DEB" ]; then
+    say "FAILED to download the driver automatically."
+    say "Install it manually - see Doc C:"
+    say "  $DOC   (also in the chd repo: docs/GPU_ACCELERATION.md)"
+    exit 2
+fi
+say "installing driver + dependency (libllvm15)..."
+apt-get update >/dev/null 2>&1 || true
+apt-get install -y libllvm15t64 >/dev/null 2>&1 || apt-get install -y libllvm15 >/dev/null 2>&1 || true
+dpkg -i "$DEB" >/dev/null 2>&1
+apt-get install -y libllvm15t64 >/dev/null 2>&1 || true
+dpkg --configure -a >/dev/null 2>&1 || true
+apt-mark hold mesa-vulkan-drivers libllvm15t64 >/dev/null 2>&1 || true
+# verify
+if command -v vulkaninfo >/dev/null 2>&1 && \
+   MESA_LOADER_DRIVER_OVERRIDE=zink TU_DEBUG=noconform vulkaninfo 2>/dev/null | grep -qi turnip; then
+    say "OK - Turnip active. Run GPU apps with:  gpuacc <app>   (e.g. gpuacc glmark2)"
+    exit 0
+fi
+say "driver installed but Turnip not confirmed. See Doc C: $DOC"
+exit 3
+SEOF
+    chmod 0755 "$_xsp/usr/local/bin/chd-gpu-setup"
     # ownership of the user's xstartup (best-effort; guest init also chowns home).
     _xsgid=$(awk -F: -v u="$_xsuser" '$1==u{print $4}' "$_xsp/etc/passwd" 2>/dev/null)
     _xsuid=$(awk -F: -v u="$_xsuser" '$1==u{print $3}' "$_xsp/etc/passwd" 2>/dev/null)
@@ -201,7 +259,11 @@ chd_self_heal() {
             echo 'export MESA_NO_ERROR=1'
             echo 'export MESA_GL_VERSION_OVERRIDE=4.3'
             echo 'export MESA_GLES_VERSION_OVERRIDE=3.2'
-            echo 'if [ -S /tmp/.virgl_test ]; then export GALLIUM_DRIVER=virpipe; else export GALLIUM_DRIVER=softpipe; export LIBGL_ALWAYS_SOFTWARE=1; fi'
+            # Software (softpipe) is the safe default for the interactive shell and
+            # desktop. Real GPU is opt-in per app via `gpuacc <app>` (Zink->Turnip),
+            # which needs the KGSL Turnip driver - run `sudo chd-gpu-setup` once.
+            echo 'export GALLIUM_DRIVER=softpipe'
+            echo 'export LIBGL_ALWAYS_SOFTWARE=1'
         } > "$_sh_p/etc/profile.d/chd_env.sh"
         chmod 644 "$_sh_p/etc/profile.d/chd_env.sh"
         print_message note "self-heal: regenerated /etc/profile.d/chd_env.sh"

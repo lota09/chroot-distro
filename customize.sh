@@ -15,18 +15,26 @@ CHD_ROOT="/data/local/chroot-distro"
 #    via su, which cannot read there. $CHD_ROOT is reachable, so we mirror there.
 ui_print "- Deploying runtime tree to $CHD_ROOT ..."
 mkdir -p "$CHD_ROOT"
-for d in lib scripts; do
+for d in lib scripts docs; do
     if [ -d "$MODPATH/$d" ]; then
         rm -rf "$CHD_ROOT/$d"
         cp -af "$MODPATH/$d" "$CHD_ROOT/"
     fi
 done
-# Normalise line endings + exec bits on everything we just deployed.
+# Normalise line endings + exec bits on lib/ + scripts/ (docs are plain text).
 find "$CHD_ROOT/lib" "$CHD_ROOT/scripts" -type f 2>/dev/null | while read -r f; do
     sed -i 's/\r$//' "$f"
     chmod 0755 "$f"
 done
-ui_print "  [OK] lib/ + scripts/ deployed"
+ui_print "  [OK] lib/ + scripts/ + docs/ deployed"
+
+# 1b) Normalise line endings on the module-root boot hooks (service.sh /
+#     post-fs-data.sh). Magisk runs these via `sh`, but a stray CRLF (from a
+#     Windows edit) still breaks the commands inside. lib/scripts are handled
+#     above; the root hooks are not, so strip CR here.
+for hook in service.sh post-fs-data.sh; do
+    [ -f "$MODPATH/$hook" ] && sed -i 's/\r$//' "$MODPATH/$hook"
+done
 
 # 2) Permissions: default recursive, then re-mark EVERY binary in system/bin as
 #    executable (set_perm_recursive makes files 0644; loop, don't hardcode names).
